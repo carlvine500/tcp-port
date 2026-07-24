@@ -40,11 +40,9 @@ Download the latest release from [GitHub Releases](https://github.com/carlvine50
 |----------|--------|
 | Linux amd64 | `tcp-port-linux-amd64` |
 | Linux arm64 | `tcp-port-linux-arm64` |
-| macOS amd64 | `tcp-port-darwin-amd64` |
 | macOS arm64 | `tcp-port-darwin-arm64` |
 
-> **Windows**: Requires [Npcap SDK](https://npcap.com/#download). Build from source:  
-> `set CGO_ENABLED=1 && set CGO_LDFLAGS=-L/path/to/npcap-sdk/Lib/x64 && go build -o tcp-port.exe`
+> **macOS amd64 (Intel)** / **Windows**: Build from source. Instructions below.
 
 ```bash
 # Example: install on Linux amd64
