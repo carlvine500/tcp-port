@@ -20,6 +20,7 @@ import (
 	"github.com/hsiafan/vlog"
 
 	"github.com/carlvine500/tcp-port/dubboport"
+	"github.com/carlvine500/tcp-port/httpport"
 	"github.com/carlvine500/tcp-port/mongoport"
 	"github.com/carlvine500/tcp-port/mysqlport"
 	"github.com/carlvine500/tcp-port/redisport"
@@ -371,6 +372,43 @@ func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 	h.Printer.Send(h.Buf.String())
 }
 
+// ---- HTTP Handler ----
+
+type httpHandler struct{ baseHandler }
+
+func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
+	defer conn.UpStream.Close()
+	defer conn.DownStream.Close()
+	reqR := bufio.NewReader(conn.UpStream)
+	defer tcpport.DiscardAll(reqR)
+	respR := bufio.NewReader(conn.DownStream)
+	defer tcpport.DiscardAll(respR)
+
+	for {
+		h.initBuf()
+		req, err := httpport.ReadHTTPMessage(reqR)
+		if err != nil {
+			break
+		}
+		if h.Config.Level == "url" {
+			h.writeLine(httpport.FormatHTTPURL(req, h.Key.SrcString(), h.Key.DstString()))
+		} else {
+			h.writeLine(httpport.FormatHTTP(req, h.Key.SrcString(), h.Key.DstString()))
+		}
+		resp, err := httpport.ReadHTTPMessage(respR)
+		if err != nil {
+			h.Printer.Send(h.Buf.String())
+			break
+		}
+		if h.Config.Level != "url" {
+			h.writeLine(httpport.FormatHTTP(resp, h.Key.DstString(), h.Key.SrcString()))
+		}
+		h.writeLine("")
+		h.Printer.Send(h.Buf.String())
+	}
+	h.Printer.Send(h.Buf.String())
+}
+
 // ---- Auto-detect multi-handler ----
 
 type autoHandler struct {
@@ -406,6 +444,7 @@ func (h *autoHandler) run() {
 		{"rocketmq", rocketmqport.DetectRocketMQ, func() TrafficHandler { return &rocketmqHandler{baseHandler: h.baseHandler} }},
 		{"mysql", mysqlport.DetectMySQL, func() TrafficHandler { return &mysqlHandler{baseHandler: h.baseHandler} }},
 		{"mongo", mongoport.DetectMongo, func() TrafficHandler { return &mongoHandler{baseHandler: h.baseHandler} }},
+		{"http", httpport.DetectHTTP, func() TrafficHandler { return &httpHandler{baseHandler: h.baseHandler} }},
 	}
 
 	for _, d := range detectors {
@@ -478,6 +517,13 @@ func main() {
 			Detector: mongoport.DetectMongo,
 			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
 				return &mongoHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
+			},
+		},
+		"http": {
+			Name:     "http",
+			Detector: httpport.DetectHTTP,
+			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
+				return &httpHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		},
 	}
