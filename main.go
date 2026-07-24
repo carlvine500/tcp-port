@@ -259,6 +259,8 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 			break
 		}
 		if h.Config.RedisCommand != "" && !tcpport.WildcardMatch(strings.ToUpper(cmd.Command), strings.ToUpper(h.Config.RedisCommand)) {
+			// Consume response to keep streams in sync
+			redisport.ReadRESPResponse(respR)
 			continue
 		}
 		// Filter by key regex
@@ -268,6 +270,8 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 				key = cmd.Args[1]
 			}
 			if !h.keyRe.MatchString(key) {
+				// Consume response to keep streams in sync
+				redisport.ReadRESPResponse(respR)
 				continue
 			}
 		}
