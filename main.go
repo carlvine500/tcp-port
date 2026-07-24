@@ -639,7 +639,7 @@ outer:
 				pkt.TransportLayer().LayerType() != layers.LayerTypeTCP {
 				continue
 			}
-			tcp := pkt.TransportLayer().(*layers.TCP)
+				tcp := pkt.TransportLayer().(*layers.TCP)
 			assembler.Assemble(pkt.NetworkLayer().NetworkFlow(), tcp, pkt.Metadata().Timestamp)
 		case <-ticker:
 			assembler.FlushOlderThan(time.Now().Add(time.Minute * -2))
@@ -717,7 +717,7 @@ func openPackets(cfg *Config) chan gopacket.Packet {
 
 func openDevice(device, ip string, port uint16) chan gopacket.Packet {
 	defer func() { _ = recover() }()
-	handle, err := pcap.OpenLive(device, 65536, false, pcap.BlockForever)
+	handle, err := pcap.OpenLive(device, 65536, true, pcap.BlockForever)
 	if err != nil {
 		logger.Warn("open device", device, "error:", err)
 		return nil
