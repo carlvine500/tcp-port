@@ -6,10 +6,9 @@ import (
 )
 
 // FormatMongoMessage formats a MongoDB message for display.
-func FormatMongoMessage(msg *MongoMessage, src, dst string) string {
+func FormatMongoMessage(msg *MongoMessage) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("%s -----> %s\n", src, dst))
 	sb.WriteString(fmt.Sprintf("  %s\n", msg.Summary))
 
 	if msg.Collection != "" && msg.Command == "" {
@@ -42,10 +41,9 @@ func FormatMongoMessage(msg *MongoMessage, src, dst string) string {
 }
 
 // FormatMongoResponse formats a MongoDB response for display.
-func FormatMongoResponse(msg *MongoMessage, src, dst string) string {
+func FormatMongoResponse(msg *MongoMessage) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("%s <----- %s\n", dst, src))
 	sb.WriteString(fmt.Sprintf("  %s\n", msg.Summary))
 
 	if msg.Command != "" {
@@ -58,6 +56,6 @@ func FormatMongoResponse(msg *MongoMessage, src, dst string) string {
 }
 
 // FormatMongoURL formats a minimal URL-level MongoDB message.
-func FormatMongoURL(msg *MongoMessage, src, dst string) string {
-	return fmt.Sprintf("%s --> %s  %s\n", src, dst, msg.Summary)
+func FormatMongoURL(msg *MongoMessage) string {
+	return fmt.Sprintf("%s\n", msg.Summary)
 }

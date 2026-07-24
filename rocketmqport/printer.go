@@ -6,9 +6,8 @@ import (
 )
 
 // FormatRemotingCommand formats a RocketMQ remoting command for display.
-func FormatRemotingCommand(cmd *RemotingCommand, src, dst string) string {
+func FormatRemotingCommand(cmd *RemotingCommand) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s -----> %s\n", src, dst))
 
 	codeName := RequestCodeName(cmd.Code)
 	sb.WriteString(fmt.Sprintf("  Code: %d (%s)\n", cmd.Code, codeName))
@@ -36,20 +35,18 @@ func FormatRemotingCommand(cmd *RemotingCommand, src, dst string) string {
 		sb.WriteString(fmt.Sprintf("  Body: %d bytes\n", len(cmd.Body)))
 	}
 
-	sb.WriteString("\n")
 	return sb.String()
 }
 
 // FormatRemotingURL formats a minimal URL-level RocketMQ command.
-func FormatRemotingURL(cmd *RemotingCommand, src, dst string) string {
+func FormatRemotingURL(cmd *RemotingCommand) string {
 	codeName := RequestCodeName(cmd.Code)
-	return fmt.Sprintf("%s --> %s  %s\n", src, dst, codeName)
+	return fmt.Sprintf("%s\n", codeName)
 }
 
 // FormatRemotingResponse formats a RocketMQ response.
-func FormatRemotingResponse(cmd *RemotingCommand, src, dst string) string {
+func FormatRemotingResponse(cmd *RemotingCommand) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s <----- %s\n", dst, src))
 
 	codeName := RequestCodeName(cmd.Code)
 	sb.WriteString(fmt.Sprintf("  Response: %d (%s)\n", cmd.Code, codeName))
@@ -62,6 +59,5 @@ func FormatRemotingResponse(cmd *RemotingCommand, src, dst string) string {
 		sb.WriteString(fmt.Sprintf("  Body: %d bytes\n", len(cmd.Body)))
 	}
 
-	sb.WriteString("\n")
 	return sb.String()
 }

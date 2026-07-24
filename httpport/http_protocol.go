@@ -118,14 +118,12 @@ func DetectHTTP(data []byte) bool {
 }
 
 // FormatHTTP formats an HTTP message for display.
-func FormatHTTP(msg *HTTPMessage, src, dst string) string {
+func FormatHTTP(msg *HTTPMessage) string {
 	var sb strings.Builder
 
 	if msg.Type == "request" {
-		sb.WriteString(fmt.Sprintf("%s -----> %s\n", src, dst))
 		sb.WriteString(fmt.Sprintf("  %s %s\n", msg.Method, msg.Path))
 	} else {
-		sb.WriteString(fmt.Sprintf("%s <----- %s\n", dst, src))
 		sb.WriteString(fmt.Sprintf("  %d %s\n", msg.StatusCode, msg.StatusText))
 	}
 
@@ -140,9 +138,9 @@ func FormatHTTP(msg *HTTPMessage, src, dst string) string {
 }
 
 // FormatHTTPURL formats a minimal URL-level HTTP message.
-func FormatHTTPURL(msg *HTTPMessage, src, dst string) string {
+func FormatHTTPURL(msg *HTTPMessage) string {
 	if msg.Type == "request" {
-		return fmt.Sprintf("%s --> %s  %s %s\n", src, dst, msg.Method, msg.Path)
+		return fmt.Sprintf("%s %s\n", msg.Method, msg.Path)
 	}
-	return fmt.Sprintf("%s <-- %s  %d %s\n", dst, src, msg.StatusCode, msg.StatusText)
+	return fmt.Sprintf("%d %s\n", msg.StatusCode, msg.StatusText)
 }

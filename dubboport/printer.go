@@ -7,12 +7,11 @@ import (
 )
 
 // FormatDubbo formats a Dubbo message for display.
-func FormatDubbo(msg *DubboMessage, src, dst string) string {
+func FormatDubbo(msg *DubboMessage) string {
 	var sb strings.Builder
 
 	if !msg.Header.IsRequest {
 		// Response
-		sb.WriteString(fmt.Sprintf("%s <----- %s\n", dst, src))
 		sb.WriteString(fmt.Sprintf("Dubbo Response  id=%d  status=%s\n", msg.Header.RequestID, msg.ResponseStatus))
 		sb.WriteString(fmt.Sprintf("  Serialization: %s\n", msg.Header.SerializationID))
 		sb.WriteString(fmt.Sprintf("  Data Length: %d bytes\n", msg.Header.DataLength))
@@ -23,7 +22,6 @@ func FormatDubbo(msg *DubboMessage, src, dst string) string {
 	}
 
 	// Request
-	sb.WriteString(fmt.Sprintf("%s -----> %s\n", src, dst))
 	sb.WriteString(fmt.Sprintf("Dubbo Request  id=%d  twoway=%v\n", msg.Header.RequestID, msg.Header.IsTwoway))
 	sb.WriteString(fmt.Sprintf("  Service: %s\n", msg.ServiceName))
 	if msg.ServiceVersion != "" {
@@ -40,10 +38,9 @@ func FormatDubbo(msg *DubboMessage, src, dst string) string {
 }
 
 // FormatTriple formats a Triple message for display.
-func FormatTriple(msg *TripleMessage, src, dst string) string {
+func FormatTriple(msg *TripleMessage) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("%s -----> %s\n", src, dst))
 	sb.WriteString(fmt.Sprintf("Triple Request\n"))
 	sb.WriteString(fmt.Sprintf("  Service: %s\n", msg.ServiceName))
 	sb.WriteString(fmt.Sprintf("  Method: %s\n", msg.MethodName))
@@ -63,17 +60,17 @@ func FormatTriple(msg *TripleMessage, src, dst string) string {
 }
 
 // FormatDubboURL formats a minimal URL-level dubbo message.
-func FormatDubboURL(msg *DubboMessage, src, dst string) string {
+func FormatDubboURL(msg *DubboMessage) string {
 	if msg.Header.IsEvent {
-		return fmt.Sprintf("[heartbeat] %s <--> %s  id=%d\n", src, dst, msg.Header.RequestID)
+		return fmt.Sprintf("[heartbeat] id=%d\n", msg.Header.RequestID)
 	}
 	if msg.Header.IsRequest {
-		return fmt.Sprintf("%s --> %s  %s/%s\n", src, dst, msg.ServiceName, msg.MethodName)
+		return fmt.Sprintf("%s/%s\n", msg.ServiceName, msg.MethodName)
 	}
-	return fmt.Sprintf("%s <-- %s  id=%d  %s\n", dst, src, msg.Header.RequestID, msg.ResponseStatus)
+	return fmt.Sprintf("id=%d  %s\n", msg.Header.RequestID, msg.ResponseStatus)
 }
 
 // FormatTripleURL formats a minimal URL-level triple message.
-func FormatTripleURL(msg *TripleMessage, src, dst string) string {
-	return fmt.Sprintf("%s --> %s  %s/%s\n", src, dst, msg.ServiceName, msg.MethodName)
+func FormatTripleURL(msg *TripleMessage) string {
+	return fmt.Sprintf("%s/%s\n", msg.ServiceName, msg.MethodName)
 }

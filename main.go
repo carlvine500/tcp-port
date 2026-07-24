@@ -84,7 +84,7 @@ type baseHandler struct {
 	Buf     *bytes.Buffer
 
 	// Timing
-	reqTime    time.Time
+	reqTime  time.Time
 	protocol string // for file routing
 }
 
@@ -112,16 +112,26 @@ func (h *baseHandler) send() {
 	h.Printer.Send(h.protocol, h.Buf.String())
 }
 
-// startReq prints the timestamp and begins timing.
+// startReq captures the current time for elapsed calculation.
 func (h *baseHandler) startReq() {
 	h.reqTime = time.Now()
-	h.writeLine(h.reqTime.Format("2006-01-02 15:04:05.000"))
 }
 
-// endReq prints the elapsed time.
-func (h *baseHandler) endReq() {
-	d := time.Since(h.reqTime)
-	h.writeLine(fmt.Sprintf("  [%.2fms]", float64(d.Microseconds())/1000))
+// writeReqLine writes the request direction line: "timestamp [src -----> dst]"
+func (h *baseHandler) writeReqLine(src, dst string) {
+	ts := h.reqTime.Format("2006-01-02 15:04:05.000")
+	fmt.Fprintf(h.Buf, "%s [%s -----> %s]\n", ts, src, dst)
+}
+
+// writeRespLine writes the response direction line with elapsed: "timestamp [src <----- dst] (Xms)"
+func (h *baseHandler) writeRespLine(src, dst string) {
+	ts := h.reqTime.Format("2006-01-02 15:04:05.000")
+	fmt.Fprintf(h.Buf, "%s [%s <----- %s] (%dms)\n", ts, dst, src, time.Since(h.reqTime).Milliseconds())
+}
+
+// hasContent returns true if the buffer has any content.
+func (h *baseHandler) hasContent() bool {
+	return h.Buf.Len() > 0
 }
 
 func (h *baseHandler) writeLine(a ...interface{}) {
@@ -176,10 +186,11 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 		if h.filterService(req.ServiceName) || h.filterMethod(req.MethodName) {
 			continue
 		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
 		if h.Config.Level == "url" {
-			h.writeLine(dubboport.FormatDubboURL(req, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(dubboport.FormatDubboURL(req))
 		} else {
-			h.writeLine(dubboport.FormatDubbo(req, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(dubboport.FormatDubbo(req))
 		}
 		if !req.Header.IsTwoway || req.Header.IsEvent {
 			h.send()
@@ -190,32 +201,34 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 			break
 		}
 		if h.Config.Level != "url" {
-			h.writeLine("")
-			h.writeLine(dubboport.FormatDubbo(resp, h.Key.DstString(), h.Key.SrcString()))
+			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+			h.writeLine(dubboport.FormatDubbo(resp))
 		}
-		h.writeLine("")
-  h.endReq()
 		h.send()
 	}
-	h.send()
+	if h.hasContent() {
+		h.send()
+	}
 }
 
 func (h *dubboHandler) handleTriple(reqR, respR *bufio.Reader) {
 	h.initBuf()
-		h.startReq()
+	h.startReq()
 	msgs, _, _ := dubboport.ReadTripleMessages(reqR)
 	for _, msg := range msgs {
 		if h.filterService(msg.ServiceName) || h.filterMethod(msg.MethodName) {
 			continue
 		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
 		if h.Config.Level == "url" {
-			h.writeLine(dubboport.FormatTripleURL(&msg, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(dubboport.FormatTripleURL(&msg))
 		} else {
-			h.writeLine(dubboport.FormatTriple(&msg, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(dubboport.FormatTriple(&msg))
 		}
-		h.writeLine("")
 	}
-	h.send()
+	if h.hasContent() {
+		h.send()
+	}
 }
 
 // ---- Redis Handler ----
@@ -240,7 +253,7 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 
 	for {
 		h.initBuf()
-			h.startReq()
+		h.startReq()
 		cmd, err := redisport.ReadRESPCommand(reqR)
 		if err != nil {
 			break
@@ -258,10 +271,11 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 				continue
 			}
 		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
 		if h.Config.Level == "url" {
-			h.writeLine(redisport.FormatRESPURL(cmd, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(redisport.FormatRESPURL(cmd))
 		} else {
-			h.writeLine(redisport.FormatRESPCommand(cmd, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(redisport.FormatRESPCommand(cmd))
 		}
 		resp, err := redisport.ReadRESPResponse(respR)
 		if err != nil {
@@ -269,13 +283,14 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 			break
 		}
 		if h.Config.Level != "url" {
-			h.writeLine(redisport.FormatRESPResponse(resp, h.Key.DstString(), h.Key.SrcString()))
+			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+			h.writeLine(redisport.FormatRESPResponse(resp))
 		}
-		h.writeLine("")
-  h.endReq()
 		h.send()
 	}
-	h.send()
+	if h.hasContent() {
+		h.send()
+	}
 }
 
 // ---- RocketMQ Handler ----
@@ -293,7 +308,7 @@ func (h *rocketmqHandler) Handle(conn *tcpport.TCPConnection) {
 
 	for {
 		h.initBuf()
-			h.startReq()
+		h.startReq()
 		req, err := rocketmqport.ReadRemotingCommand(reqR)
 		if err != nil {
 			break
@@ -301,10 +316,11 @@ func (h *rocketmqHandler) Handle(conn *tcpport.TCPConnection) {
 		if h.Config.RMQCode != 0 && req.Code != h.Config.RMQCode {
 			continue
 		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
 		if h.Config.Level == "url" {
-			h.writeLine(rocketmqport.FormatRemotingURL(req, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(rocketmqport.FormatRemotingURL(req))
 		} else {
-			h.writeLine(rocketmqport.FormatRemotingCommand(req, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(rocketmqport.FormatRemotingCommand(req))
 		}
 		resp, err := rocketmqport.ReadRemotingCommand(respR)
 		if err != nil {
@@ -312,13 +328,14 @@ func (h *rocketmqHandler) Handle(conn *tcpport.TCPConnection) {
 			break
 		}
 		if h.Config.Level != "url" {
-			h.writeLine(rocketmqport.FormatRemotingResponse(resp, h.Key.DstString(), h.Key.SrcString()))
+			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+			h.writeLine(rocketmqport.FormatRemotingResponse(resp))
 		}
-		h.writeLine("")
-  h.endReq()
 		h.send()
 	}
-	h.send()
+	if h.hasContent() {
+		h.send()
+	}
 }
 
 // ---- MySQL Handler ----
@@ -336,21 +353,21 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 
 	// Handshake
 	h.initBuf()
-		h.startReq()
+	h.startReq()
 	if msg, err := mysqlport.ReadMySQLMessage(serverR, "S->C"); err == nil {
 		if h.Config.Level == "url" {
-			h.writeLine(mysqlport.FormatMySQLURL(msg, h.Key.SrcString(), h.Key.DstString()))
+			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+			h.writeLine(mysqlport.FormatMySQLURL(msg))
 		} else if msg.Type == "handshake" {
-			h.writeLine(mysqlport.FormatMySQLMessage(msg, h.Key.SrcString(), h.Key.DstString()))
+			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+			h.writeLine(mysqlport.FormatMySQLMessage(msg))
 		}
-		h.writeLine("")
-  h.endReq()
 		h.send()
 	}
 
 	for {
 		h.initBuf()
-			h.startReq()
+		h.startReq()
 		cmd, err := mysqlport.ReadMySQLMessage(clientR, "C->S")
 		if err != nil {
 			break
@@ -361,10 +378,11 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 		if h.Config.MySQLQuery != "" && !strings.Contains(cmd.Query, h.Config.MySQLQuery) {
 			continue
 		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
 		if h.Config.Level == "url" {
-			h.writeLine(mysqlport.FormatMySQLURL(cmd, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(mysqlport.FormatMySQLURL(cmd))
 		} else {
-			h.writeLine(mysqlport.FormatMySQLMessage(cmd, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(mysqlport.FormatMySQLMessage(cmd))
 		}
 		for i := 0; i < 10; i++ {
 			resp, err := mysqlport.ReadMySQLMessage(serverR, "S->C")
@@ -372,17 +390,18 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 				break
 			}
 			if h.Config.Level != "url" {
-				h.writeLine(mysqlport.FormatMySQLMessage(resp, h.Key.DstString(), h.Key.SrcString()))
+				h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+				h.writeLine(mysqlport.FormatMySQLMessage(resp))
 			}
 			if resp.Type == "ok" || resp.Type == "eof" || resp.Type == "error" {
 				break
 			}
 		}
-		h.writeLine("")
-  h.endReq()
 		h.send()
 	}
-	h.send()
+	if h.hasContent() {
+		h.send()
+	}
 }
 
 // ---- MongoDB Handler ----
@@ -400,7 +419,7 @@ func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 
 	for {
 		h.initBuf()
-			h.startReq()
+		h.startReq()
 		req, err := mongoport.ReadMongoMessage(reqR, "C->S")
 		if err != nil {
 			break
@@ -408,10 +427,11 @@ func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 		if h.Config.MongoOpCode != 0 && req.Header.OpCode != int32(h.Config.MongoOpCode) {
 			continue
 		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
 		if h.Config.Level == "url" {
-			h.writeLine(mongoport.FormatMongoURL(req, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(mongoport.FormatMongoURL(req))
 		} else {
-			h.writeLine(mongoport.FormatMongoMessage(req, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(mongoport.FormatMongoMessage(req))
 		}
 		for i := 0; i < 5; i++ {
 			resp, err := mongoport.ReadMongoMessage(respR, "S->C")
@@ -419,14 +439,15 @@ func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 				break
 			}
 			if h.Config.Level != "url" {
-				h.writeLine(mongoport.FormatMongoResponse(resp, h.Key.DstString(), h.Key.SrcString()))
+				h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+				h.writeLine(mongoport.FormatMongoResponse(resp))
 			}
 		}
-		h.writeLine("")
-  h.endReq()
 		h.send()
 	}
-	h.send()
+	if h.hasContent() {
+		h.send()
+	}
 }
 
 // ---- HTTP Handler ----
@@ -444,15 +465,16 @@ func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 
 	for {
 		h.initBuf()
-			h.startReq()
+		h.startReq()
 		req, err := httpport.ReadHTTPMessage(reqR)
 		if err != nil {
 			break
 		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
 		if h.Config.Level == "url" {
-			h.writeLine(httpport.FormatHTTPURL(req, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(httpport.FormatHTTPURL(req))
 		} else {
-			h.writeLine(httpport.FormatHTTP(req, h.Key.SrcString(), h.Key.DstString()))
+			h.writeLine(httpport.FormatHTTP(req))
 		}
 		resp, err := httpport.ReadHTTPMessage(respR)
 		if err != nil {
@@ -460,25 +482,26 @@ func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 			break
 		}
 		if h.Config.Level != "url" {
-			h.writeLine(httpport.FormatHTTP(resp, h.Key.DstString(), h.Key.SrcString()))
+			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+			h.writeLine(httpport.FormatHTTP(resp))
 		}
-		h.writeLine("")
-  h.endReq()
 		h.send()
 	}
-	h.send()
+	if h.hasContent() {
+		h.send()
+	}
 }
 
 // ---- Auto-detect multi-handler ----
 
 type autoHandler struct {
 	baseHandler
-	detected    string
-	subHandler  TrafficHandler
-	conn        *tcpport.TCPConnection
-	setup       sync.Once
-	peekResult  []byte
-	peekErr     error
+	detected   string
+	subHandler TrafficHandler
+	conn       *tcpport.TCPConnection
+	setup      sync.Once
+	peekResult []byte
+	peekErr    error
 }
 
 func (h *autoHandler) Handle(conn *tcpport.TCPConnection) {
@@ -653,7 +676,7 @@ outer:
 				pkt.TransportLayer().LayerType() != layers.LayerTypeTCP {
 				continue
 			}
-					tcp := pkt.TransportLayer().(*layers.TCP)
+			tcp := pkt.TransportLayer().(*layers.TCP)
 			assembler.Assemble(pkt.NetworkLayer().NetworkFlow(), tcp, pkt.Metadata().Timestamp)
 		case <-ticker:
 			assembler.FlushOlderThan(time.Now().Add(time.Minute * -2))

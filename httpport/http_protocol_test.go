@@ -164,7 +164,7 @@ func TestReadHTTPResponse(t *testing.T) {
 }
 
 func TestFormatHTTP(t *testing.T) {
-	// Request formatting with src/dst
+	// Request formatting
 	t.Run("request", func(t *testing.T) {
 		msg := &HTTPMessage{
 			Type:    "request",
@@ -172,10 +172,7 @@ func TestFormatHTTP(t *testing.T) {
 			Path:    "/",
 			Headers: map[string]string{"host": "example.com"},
 		}
-		out := FormatHTTP(msg, "10.0.0.1:12345", "10.0.0.2:80")
-		if !bytes.Contains([]byte(out), []byte("10.0.0.1:12345 -----> 10.0.0.2:80")) {
-			t.Errorf("Output should contain src -----> dst, got: %s", out)
-		}
+		out := FormatHTTP(msg)
 		if !bytes.Contains([]byte(out), []byte("GET /")) {
 			t.Errorf("Output should contain GET /, got: %s", out)
 		}
@@ -184,7 +181,7 @@ func TestFormatHTTP(t *testing.T) {
 		}
 	})
 
-	// Response formatting with src/dst
+	// Response formatting
 	t.Run("response", func(t *testing.T) {
 		msg := &HTTPMessage{
 			Type:       "response",
@@ -192,10 +189,7 @@ func TestFormatHTTP(t *testing.T) {
 			StatusText: "OK",
 			Headers:    map[string]string{"server": "nginx", "content-type": "text/html"},
 		}
-		out := FormatHTTP(msg, "10.0.0.2:80", "10.0.0.1:12345")
-		if !bytes.Contains([]byte(out), []byte("<-----")) {
-			t.Errorf("Output should contain <-----, got: %s", out)
-		}
+		out := FormatHTTP(msg)
 		if !bytes.Contains([]byte(out), []byte("200 OK")) {
 			t.Errorf("Output should contain 200 OK, got: %s", out)
 		}
@@ -214,8 +208,8 @@ func TestFormatHTTP(t *testing.T) {
 			Method: "POST",
 			Path:   "/api/data",
 		}
-		out := FormatHTTPURL(msg, "10.0.0.1:12345", "10.0.0.2:80")
-		expected := "10.0.0.1:12345 --> 10.0.0.2:80  POST /api/data\n"
+		out := FormatHTTPURL(msg)
+		expected := "POST /api/data\n"
 		if out != expected {
 			t.Errorf("FormatHTTPURL = %q, want %q", out, expected)
 		}
@@ -227,8 +221,8 @@ func TestFormatHTTP(t *testing.T) {
 			StatusCode: 404,
 			StatusText: "Not Found",
 		}
-		out := FormatHTTPURL(msg, "10.0.0.2:80", "10.0.0.1:12345")
-		expected := "10.0.0.1:12345 <-- 10.0.0.2:80  404 Not Found\n"
+		out := FormatHTTPURL(msg)
+		expected := "404 Not Found\n"
 		if out != expected {
 			t.Errorf("FormatHTTPURL = %q, want %q", out, expected)
 		}

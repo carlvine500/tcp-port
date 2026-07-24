@@ -158,11 +158,8 @@ func TestReadRESPCommandPipeline(t *testing.T) {
 
 func TestFormatRESPCommand(t *testing.T) {
 	cmd := &RESPCommand{Command: "SET", Args: []string{"SET", "mykey", "myval"}}
-	out := FormatRESPCommand(cmd, "10.0.0.1:12345", "10.0.0.2:6379")
+	out := FormatRESPCommand(cmd)
 	if !bytes.Contains([]byte(out), []byte("SET")) {
 		t.Errorf("Output should contain SET")
-	}
-	if !bytes.Contains([]byte(out), []byte("10.0.0.1")) {
-		t.Errorf("Output should contain src IP")
 	}
 }

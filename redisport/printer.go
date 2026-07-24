@@ -6,9 +6,8 @@ import (
 )
 
 // FormatRESPCommand formats a Redis command for display.
-func FormatRESPCommand(cmd *RESPCommand, src, dst string) string {
+func FormatRESPCommand(cmd *RESPCommand) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s -----> %s\n", src, dst))
 
 	if cmd.Command != "" {
 		known := ""
@@ -32,9 +31,8 @@ func FormatRESPCommand(cmd *RESPCommand, src, dst string) string {
 }
 
 // FormatRESPResponse formats a Redis response for display.
-func FormatRESPResponse(resp *RESPResponse, src, dst string) string {
+func FormatRESPResponse(resp *RESPResponse) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s <----- %s\n", dst, src))
 	typeName := RESPType(resp.Type)
 	if resp.IsError {
 		sb.WriteString(fmt.Sprintf("  [%s] ERR: %s\n", typeName, resp.Value))
@@ -49,13 +47,13 @@ func FormatRESPResponse(resp *RESPResponse, src, dst string) string {
 }
 
 // FormatRESPURL formats a minimal URL-level Redis command.
-func FormatRESPURL(cmd *RESPCommand, src, dst string) string {
+func FormatRESPURL(cmd *RESPCommand) string {
 	if cmd.Command != "" {
 		key := ""
 		if len(cmd.Args) > 1 {
 			key = " " + cmd.Args[1]
 		}
-		return fmt.Sprintf("%s --> %s  %s%s\n", src, dst, cmd.Command, key)
+		return fmt.Sprintf("%s%s\n", cmd.Command, key)
 	}
-	return fmt.Sprintf("%s --> %s  %s\n", src, dst, cmd.Raw)
+	return fmt.Sprintf("%s\n", cmd.Raw)
 }
