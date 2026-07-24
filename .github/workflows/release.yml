@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            artifact: tcp-port-linux-amd64
+            ext: ""
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: tcp-port-linux-arm64
+            ext: ""
+          - os: darwin
+            arch: amd64
+            runner: macos-13
+            artifact: tcp-port-darwin-amd64
+            ext: ""
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
+            artifact: tcp-port-darwin-arm64
+            ext: ""
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+            artifact: tcp-port-windows-amd64
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install libpcap (Linux)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
+      - name: Install libpcap (macOS)
+        if: matrix.os == 'darwin'
+        run: brew install libpcap
+
+      - name: Install Npcap SDK (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          curl -L -o npcap-sdk.zip https://npcap.com/dist/npcap-sdk-1.13.zip
+          7z x npcap-sdk.zip -oC:\npcap-sdk
+          echo "CGO_ENABLED=1" >> $env:GITHUB_ENV
+          echo "CGO_LDFLAGS=-LC:\\npcap-sdk\\Lib\\x64" >> $env:GITHUB_ENV
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 1
+        run: |
+          go build -ldflags="-s -w" -o "${{ matrix.artifact }}${{ matrix.ext }}" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}${{ matrix.ext }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: tcp-port-*
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
