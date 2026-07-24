@@ -34,13 +34,14 @@ func init() { logger.SetAppenders(vlog.NewConsole2Appender()) }
 
 // Config holds all CLI flags.
 type Config struct {
-	Level    string
-	IP       string
-	Port     uint16
-	Device   string
-	File     string
-	Output   string
-	Protocol string // dubbo, redis, rocketmq, mysql, mongo, auto
+	Level     string
+	IP        string
+	Port      uint16
+	Device    string
+	File      string
+	Output    string
+	OutputDir string
+	Protocol  string // dubbo, redis, rocketmq, mysql, mongo, auto
 
 	// Protocol-specific filters
 	DubboService string
@@ -57,7 +58,7 @@ type Config struct {
 type ProtocolHandler struct {
 	Name     string
 	Detector tcpport.ProtocolDetector
-	Handler  func(ck ConnectionKey, cfg *Config, printer *tcpport.Printer) TrafficHandler
+	Handler  func(ck ConnectionKey, cfg *Config, printer *tcpport.MultiPrinter) TrafficHandler
 }
 
 // ConnectionKey identifies a connection.
@@ -79,15 +80,53 @@ type TrafficHandler interface {
 type baseHandler struct {
 	Key     ConnectionKey
 	Config  *Config
-	Printer *tcpport.Printer
+	Printer *tcpport.MultiPrinter
 	Buf     *bytes.Buffer
+
+	// Timing
+	reqTime    time.Time
+	protocol string // for file routing
+}
+
+func (h *baseHandler) initBuf() { h.Buf = new(bytes.Buffer) }
+
+// nowStr returns current time formatted as "2006-01-02 15:04:05.000".
+func nowStr() string {
+	return time.Now().Format("2006-01-02 15:04:05.000")
+}
+
+// markReq captures the current time and returns the formatted timestamp.
+func (h *baseHandler) markReq() string {
+	h.reqTime = time.Now()
+	return h.reqTime.Format("2006-01-02 15:04:05.000")
+}
+
+// elapsed returns the duration since markReq was called.
+func (h *baseHandler) elapsed() string {
+	d := time.Since(h.reqTime)
+	return fmt.Sprintf("%.2fms", float64(d.Microseconds())/1000)
+}
+
+// send queues output with protocol routing.
+func (h *baseHandler) send() {
+	h.Printer.Send(h.protocol, h.Buf.String())
+}
+
+// startReq prints the timestamp and begins timing.
+func (h *baseHandler) startReq() {
+	h.reqTime = time.Now()
+	h.writeLine(h.reqTime.Format("2006-01-02 15:04:05.000"))
+}
+
+// endReq prints the elapsed time.
+func (h *baseHandler) endReq() {
+	d := time.Since(h.reqTime)
+	h.writeLine(fmt.Sprintf("  [%.2fms]", float64(d.Microseconds())/1000))
 }
 
 func (h *baseHandler) writeLine(a ...interface{}) {
 	fmt.Fprintln(h.Buf, a...)
 }
-
-func (h *baseHandler) initBuf() { h.Buf = new(bytes.Buffer) }
 
 func (h *baseHandler) filterService(service string) bool {
 	if h.Config.DubboService != "" && !tcpport.WildcardMatch(service, h.Config.DubboService) {
@@ -110,6 +149,7 @@ type dubboHandler struct{ baseHandler }
 func (h *dubboHandler) Handle(conn *tcpport.TCPConnection) {
 	defer conn.UpStream.Close()
 	defer conn.DownStream.Close()
+	h.protocol = "dubbo"
 
 	reqR := bufio.NewReader(conn.UpStream)
 	defer tcpport.DiscardAll(reqR)
@@ -128,6 +168,7 @@ func (h *dubboHandler) Handle(conn *tcpport.TCPConnection) {
 func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 	for {
 		h.initBuf()
+		h.startReq()
 		req, err := dubboport.ReadDubboMessage(reqR)
 		if err != nil {
 			break
@@ -141,7 +182,7 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 			h.writeLine(dubboport.FormatDubbo(req, h.Key.SrcString(), h.Key.DstString()))
 		}
 		if !req.Header.IsTwoway || req.Header.IsEvent {
-			h.Printer.Send(h.Buf.String())
+			h.send()
 			continue
 		}
 		resp, err := dubboport.ReadDubboMessage(respR)
@@ -153,13 +194,15 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 			h.writeLine(dubboport.FormatDubbo(resp, h.Key.DstString(), h.Key.SrcString()))
 		}
 		h.writeLine("")
-		h.Printer.Send(h.Buf.String())
+  h.endReq()
+		h.send()
 	}
-	h.Printer.Send(h.Buf.String())
+	h.send()
 }
 
 func (h *dubboHandler) handleTriple(reqR, respR *bufio.Reader) {
 	h.initBuf()
+		h.startReq()
 	msgs, _, _ := dubboport.ReadTripleMessages(reqR)
 	for _, msg := range msgs {
 		if h.filterService(msg.ServiceName) || h.filterMethod(msg.MethodName) {
@@ -172,7 +215,7 @@ func (h *dubboHandler) handleTriple(reqR, respR *bufio.Reader) {
 		}
 		h.writeLine("")
 	}
-	h.Printer.Send(h.Buf.String())
+	h.send()
 }
 
 // ---- Redis Handler ----
@@ -185,6 +228,7 @@ type redisHandler struct {
 func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 	defer conn.UpStream.Close()
 	defer conn.DownStream.Close()
+	h.protocol = "redis"
 	reqR := bufio.NewReader(conn.UpStream)
 	defer tcpport.DiscardAll(reqR)
 	respR := bufio.NewReader(conn.DownStream)
@@ -196,6 +240,7 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 
 	for {
 		h.initBuf()
+			h.startReq()
 		cmd, err := redisport.ReadRESPCommand(reqR)
 		if err != nil {
 			break
@@ -220,16 +265,17 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 		}
 		resp, err := redisport.ReadRESPResponse(respR)
 		if err != nil {
-			h.Printer.Send(h.Buf.String())
+			h.send()
 			break
 		}
 		if h.Config.Level != "url" {
 			h.writeLine(redisport.FormatRESPResponse(resp, h.Key.DstString(), h.Key.SrcString()))
 		}
 		h.writeLine("")
-		h.Printer.Send(h.Buf.String())
+  h.endReq()
+		h.send()
 	}
-	h.Printer.Send(h.Buf.String())
+	h.send()
 }
 
 // ---- RocketMQ Handler ----
@@ -239,6 +285,7 @@ type rocketmqHandler struct{ baseHandler }
 func (h *rocketmqHandler) Handle(conn *tcpport.TCPConnection) {
 	defer conn.UpStream.Close()
 	defer conn.DownStream.Close()
+	h.protocol = "rocketmq"
 	reqR := bufio.NewReader(conn.UpStream)
 	defer tcpport.DiscardAll(reqR)
 	respR := bufio.NewReader(conn.DownStream)
@@ -246,6 +293,7 @@ func (h *rocketmqHandler) Handle(conn *tcpport.TCPConnection) {
 
 	for {
 		h.initBuf()
+			h.startReq()
 		req, err := rocketmqport.ReadRemotingCommand(reqR)
 		if err != nil {
 			break
@@ -260,16 +308,17 @@ func (h *rocketmqHandler) Handle(conn *tcpport.TCPConnection) {
 		}
 		resp, err := rocketmqport.ReadRemotingCommand(respR)
 		if err != nil {
-			h.Printer.Send(h.Buf.String())
+			h.send()
 			break
 		}
 		if h.Config.Level != "url" {
 			h.writeLine(rocketmqport.FormatRemotingResponse(resp, h.Key.DstString(), h.Key.SrcString()))
 		}
 		h.writeLine("")
-		h.Printer.Send(h.Buf.String())
+  h.endReq()
+		h.send()
 	}
-	h.Printer.Send(h.Buf.String())
+	h.send()
 }
 
 // ---- MySQL Handler ----
@@ -279,6 +328,7 @@ type mysqlHandler struct{ baseHandler }
 func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 	defer conn.UpStream.Close()
 	defer conn.DownStream.Close()
+	h.protocol = "mysql"
 	clientR := bufio.NewReader(conn.UpStream)
 	defer tcpport.DiscardAll(clientR)
 	serverR := bufio.NewReader(conn.DownStream)
@@ -286,6 +336,7 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 
 	// Handshake
 	h.initBuf()
+		h.startReq()
 	if msg, err := mysqlport.ReadMySQLMessage(serverR, "S->C"); err == nil {
 		if h.Config.Level == "url" {
 			h.writeLine(mysqlport.FormatMySQLURL(msg, h.Key.SrcString(), h.Key.DstString()))
@@ -293,11 +344,13 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 			h.writeLine(mysqlport.FormatMySQLMessage(msg, h.Key.SrcString(), h.Key.DstString()))
 		}
 		h.writeLine("")
-		h.Printer.Send(h.Buf.String())
+  h.endReq()
+		h.send()
 	}
 
 	for {
 		h.initBuf()
+			h.startReq()
 		cmd, err := mysqlport.ReadMySQLMessage(clientR, "C->S")
 		if err != nil {
 			break
@@ -326,9 +379,10 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 			}
 		}
 		h.writeLine("")
-		h.Printer.Send(h.Buf.String())
+  h.endReq()
+		h.send()
 	}
-	h.Printer.Send(h.Buf.String())
+	h.send()
 }
 
 // ---- MongoDB Handler ----
@@ -338,6 +392,7 @@ type mongoHandler struct{ baseHandler }
 func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 	defer conn.UpStream.Close()
 	defer conn.DownStream.Close()
+	h.protocol = "mongo"
 	reqR := bufio.NewReader(conn.UpStream)
 	defer tcpport.DiscardAll(reqR)
 	respR := bufio.NewReader(conn.DownStream)
@@ -345,6 +400,7 @@ func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 
 	for {
 		h.initBuf()
+			h.startReq()
 		req, err := mongoport.ReadMongoMessage(reqR, "C->S")
 		if err != nil {
 			break
@@ -367,9 +423,10 @@ func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 			}
 		}
 		h.writeLine("")
-		h.Printer.Send(h.Buf.String())
+  h.endReq()
+		h.send()
 	}
-	h.Printer.Send(h.Buf.String())
+	h.send()
 }
 
 // ---- HTTP Handler ----
@@ -379,6 +436,7 @@ type httpHandler struct{ baseHandler }
 func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 	defer conn.UpStream.Close()
 	defer conn.DownStream.Close()
+	h.protocol = "http"
 	reqR := bufio.NewReader(conn.UpStream)
 	defer tcpport.DiscardAll(reqR)
 	respR := bufio.NewReader(conn.DownStream)
@@ -386,6 +444,7 @@ func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 
 	for {
 		h.initBuf()
+			h.startReq()
 		req, err := httpport.ReadHTTPMessage(reqR)
 		if err != nil {
 			break
@@ -397,16 +456,17 @@ func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 		}
 		resp, err := httpport.ReadHTTPMessage(respR)
 		if err != nil {
-			h.Printer.Send(h.Buf.String())
+			h.send()
 			break
 		}
 		if h.Config.Level != "url" {
 			h.writeLine(httpport.FormatHTTP(resp, h.Key.DstString(), h.Key.SrcString()))
 		}
 		h.writeLine("")
-		h.Printer.Send(h.Buf.String())
+  h.endReq()
+		h.send()
 	}
-	h.Printer.Send(h.Buf.String())
+	h.send()
 }
 
 // ---- Auto-detect multi-handler ----
@@ -465,7 +525,7 @@ func (h *autoHandler) run() {
 
 type connHandlerAdapter struct {
 	cfg     *Config
-	printer *tcpport.Printer
+	printer *tcpport.MultiPrinter
 	proto   *ProtocolHandler
 }
 
@@ -487,42 +547,42 @@ func main() {
 		"dubbo": {
 			Name:     "dubbo",
 			Detector: dubboport.DetectDubbo,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
+			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
 				return &dubboHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		},
 		"redis": {
 			Name:     "redis",
 			Detector: redisport.DetectRESP,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
+			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
 				return &redisHandler{baseHandler: baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		},
 		"rocketmq": {
 			Name:     "rocketmq",
 			Detector: rocketmqport.DetectRocketMQ,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
+			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
 				return &rocketmqHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		},
 		"mysql": {
 			Name:     "mysql",
 			Detector: mysqlport.DetectMySQL,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
+			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
 				return &mysqlHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		},
 		"mongo": {
 			Name:     "mongo",
 			Detector: mongoport.DetectMongo,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
+			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
 				return &mongoHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		},
 		"http": {
 			Name:     "http",
 			Detector: httpport.DetectHTTP,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
+			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
 				return &httpHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		},
@@ -542,7 +602,7 @@ func main() {
 				}
 				return false
 			},
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
+			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
 				return &autoHandler{baseHandler: baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		}
@@ -556,7 +616,7 @@ func main() {
 		}
 	}
 
-	printer := tcpport.NewPrinter(cfg.Output)
+	printer := tcpport.NewMultiPrinter(cfg.OutputDir)
 	adapter := &connHandlerAdapter{cfg: cfg, printer: printer, proto: proto}
 	assembler := tcpport.NewTCPAssembler(adapter, proto.Detector)
 	assembler.FilterIP = cfg.IP
@@ -608,7 +668,8 @@ func parseFlags() *Config {
 	fs.UintVar(&port, "port", 0, "Filter by port (default: any)")
 	fs.StringVar(&cfg.Device, "device", "any", "Capture from network device")
 	fs.StringVar(&cfg.File, "file", "", "Read from pcap file")
-	fs.StringVar(&cfg.Output, "output", "", "Write to file instead of stdout")
+	fs.StringVar(&cfg.Output, "output", "", "Write to single file instead of stdout")
+	fs.StringVar(&cfg.OutputDir, "output-dir", "", "Write per-protocol files to directory (e.g., redis.log, mysql.log)")
 	fs.StringVar(&cfg.Protocol, "protocol", "auto", "Protocol: auto, dubbo, redis, rocketmq, mysql, mongo")
 
 	fs.StringVar(&cfg.DubboService, "dubbo-service", "", "Dubbo: filter by service name (wildcard)")
