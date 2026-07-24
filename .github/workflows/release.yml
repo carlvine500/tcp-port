@@ -35,11 +35,8 @@ jobs:
             runner: macos-latest
             artifact: tcp-port-darwin-arm64
             ext: ""
-          - os: windows
-            arch: amd64
-            runner: windows-latest
-            artifact: tcp-port-windows-amd64
-            ext: ".exe"
+          # Windows requires Npcap SDK; download from https://npcap.com/#download
+          # Build manually: GOOS=windows CGO_ENABLED=1 CGO_LDFLAGS="-L/path/to/npcap-sdk/Lib/x64" go build
 
     steps:
       - uses: actions/checkout@v4
@@ -55,15 +52,6 @@ jobs:
       - name: Install libpcap (macOS)
         if: matrix.os == 'darwin'
         run: brew install libpcap
-
-      - name: Install Npcap SDK (Windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          $url = "https://npcap.com/dist/npcap-sdk-1.13.zip"
-          Invoke-WebRequest -Uri $url -OutFile npcap-sdk.zip
-          Expand-Archive -Path npcap-sdk.zip -DestinationPath C:\npcap-sdk
-          echo "CGO_LDFLAGS=-LC:\\npcap-sdk\\Lib\\x64" >> $env:GITHUB_ENV
 
       - name: Build
         env:
