@@ -41,6 +41,29 @@ sudo apt-get install libpcap0.8
 sudo yum install libpcap
 ```
 
+### 预编译二进制
+
+从 [GitHub Releases](https://github.com/carlvine500/tcp-port/releases) 下载最新版本：
+
+| 平台 | 二进制文件 |
+|------|-----------|
+| Linux amd64 | `tcp-port-linux-amd64` |
+| Linux amd64 (CentOS 7) | `tcp-port-linux-amd64-centos7` |
+| Linux arm64 | `tcp-port-linux-arm64` |
+| macOS arm64 | `tcp-port-darwin-arm64` |
+
+```bash
+# 示例：Linux amd64 安装
+curl -L https://github.com/carlvine500/tcp-port/releases/latest/download/tcp-port-linux-amd64 -o tcp-port
+chmod +x tcp-port
+sudo mv tcp-port /usr/local/bin/
+
+# CentOS 7 请用这个（兼容 glibc 2.17）
+curl -L https://github.com/carlvine500/tcp-port/releases/latest/download/tcp-port-linux-amd64-centos7 -o tcp-port
+chmod +x tcp-port
+sudo mv tcp-port /usr/local/bin/
+```
+
 ### 源码编译
 
 ```bash

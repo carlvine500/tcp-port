@@ -30,10 +30,6 @@ jobs:
             runner: macos-latest
             artifact: tcp-port-darwin-arm64
             ext: ""
-          # macOS amd64 (Intel): build from source on Intel Mac or use macos-13 runner
-          # GOARCH=amd64 go build -ldflags="-s -w" -o tcp-port-darwin-amd64 .
-          # Windows requires Npcap SDK; download from https://npcap.com/#download
-          # Build manually: GOOS=windows CGO_ENABLED=1 CGO_LDFLAGS="-L/path/to/npcap-sdk/Lib/x64" go build
 
     steps:
       - uses: actions/checkout@v4
@@ -64,9 +60,45 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}${{ matrix.ext }}
 
+  centos7:
+    name: Build CentOS 7 (glibc 2.17)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in CentOS 7 container
+        run: |
+          cat > Dockerfile.centos7 << 'DOCKEREOF'
+          FROM centos:7
+          # CentOS 7 EOL — use vault archives
+          RUN sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*.repo && \
+              sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo && \
+              yum install -y epel-release && \
+              sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/epel*.repo && \
+              sed -i 's|#baseurl|baseurl|g' /etc/yum.repos.d/epel*.repo && \
+              sed -i 's|download.fedoraproject.org/pub|archives.fedoraproject.org/pub/archive|g' /etc/yum.repos.d/epel*.repo && \
+              yum install -y libpcap-devel gcc make && \
+              yum clean all
+          RUN curl -fsSL https://go.dev/dl/go1.22.10.linux-amd64.tar.gz | tar -C /usr/local -xz
+          ENV PATH="/usr/local/go/bin:$PATH"
+          WORKDIR /build
+          COPY . .
+          RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o tcp-port-centos7 .
+          DOCKEREOF
+          docker build -f Dockerfile.centos7 -t tcp-port-centos7 .
+          docker create --name tmp tcp-port-centos7
+          docker cp tmp:/build/tcp-port-centos7 ./tcp-port-linux-amd64-centos7
+          docker rm tmp
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcp-port-linux-amd64-centos7
+          path: tcp-port-linux-amd64-centos7
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, centos7]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

@@ -51,6 +51,7 @@ Download the latest release from [GitHub Releases](https://github.com/carlvine50
 | Platform | Binary |
 |----------|--------|
 | Linux amd64 | `tcp-port-linux-amd64` |
+| Linux amd64 (CentOS 7) | `tcp-port-linux-amd64-centos7` |
 | Linux arm64 | `tcp-port-linux-arm64` |
 | macOS arm64 | `tcp-port-darwin-arm64` |
 
