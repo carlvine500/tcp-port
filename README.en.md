@@ -21,6 +21,8 @@ Features: **auto protocol detection**, **millisecond-precision timestamps**, **r
 
 ### Prerequisites
 
+**Build dependency** (source build only):
+
 ```bash
 # Ubuntu / Debian
 sudo apt-get install libpcap-dev
@@ -30,6 +32,16 @@ sudo yum install libpcap-devel
 
 # macOS
 brew install libpcap
+```
+
+**Runtime dependency** (pre-built binary; most Linux distros include it — install if you see `libpcap.so.0.8: cannot open`):
+
+```bash
+# Ubuntu / Debian
+sudo apt-get install libpcap0.8
+
+# CentOS / RHEL
+sudo yum install libpcap
 ```
 
 ### Pre-built Binaries

@@ -21,12 +21,24 @@
 
 ### 前置依赖
 
+**编译依赖**（仅源码编译时需要）：
+
 ```bash
 # Ubuntu / Debian
 sudo apt-get install libpcap-dev
 
 # CentOS / RHEL
 sudo yum install libpcap-devel
+```
+
+**运行时依赖**（使用预编译二进制时需要。大多数 Linux 已自带，报错 `libpcap.so.0.8: cannot open` 则安装）：
+
+```bash
+# Ubuntu / Debian
+sudo apt-get install libpcap0.8
+
+# CentOS / RHEL
+sudo yum install libpcap
 ```
 
 ### 源码编译
