@@ -11,6 +11,9 @@ func FormatMongoMessage(msg *MongoMessage) string {
 
 	sb.WriteString(fmt.Sprintf("  %s\n", msg.Summary))
 
+	if msg.BSONBody != "" {
+		sb.WriteString(fmt.Sprintf("  BSON: %s\n", msg.BSONBody))
+	}
 	if msg.Collection != "" && msg.Command == "" {
 		sb.WriteString(fmt.Sprintf("  Collection: %s\n", msg.Collection))
 	}
@@ -46,6 +49,9 @@ func FormatMongoResponse(msg *MongoMessage) string {
 
 	sb.WriteString(fmt.Sprintf("  %s\n", msg.Summary))
 
+	if msg.BSONBody != "" {
+		sb.WriteString(fmt.Sprintf("  BSON: %s\n", msg.BSONBody))
+	}
 	if msg.Command != "" {
 		sb.WriteString(fmt.Sprintf("  Command: %s\n", msg.Command))
 	}

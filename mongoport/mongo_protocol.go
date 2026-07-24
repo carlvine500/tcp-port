@@ -4,6 +4,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // MongoDB wire protocol constants.
@@ -71,6 +75,12 @@ type MongoMessage struct {
 	FullCollectionName string
 	NumberToSkip       int32
 	NumberToReturn     int32
+
+	// Parsed BSON body
+	BSONBody string // JSON representation of the BSON body document
+
+	// OP_REPLY fields
+	NumDocs int32
 
 	// Generic
 	Direction string
@@ -157,12 +167,14 @@ func (msg *MongoMessage) parseOpMsg(body []byte) {
 	bodyData := body[5:]
 	if msg.Kind == 1 && len(bodyData) > 0 {
 		// Document sequence: skip sequence section, find body section
-		// Simplified: just scan the body section
 		idx := findBodySection(bodyData)
 		if idx >= 0 && idx < len(bodyData) {
 			bodyData = bodyData[idx:]
 		}
 	}
+
+	// Parse full BSON body to JSON
+	msg.BSONBody = bsonToJSON(bodyData)
 
 	// Extract first key from BSON document (the command name)
 	msg.Command = extractBSONFirstKey(bodyData)
@@ -206,7 +218,16 @@ func (msg *MongoMessage) parseOpQuery(body []byte) {
 func (msg *MongoMessage) parseOpReply(body []byte) {
 	nDocs := int32(0)
 	if len(body) >= 20 {
+		_ = int32(binary.LittleEndian.Uint32(body[0:4]))  // flags
+		_ = int64(binary.LittleEndian.Uint32(body[4:12])) // cursorID
+		_ = int32(binary.LittleEndian.Uint32(body[12:16])) // startingFrom
 		nDocs = int32(binary.LittleEndian.Uint32(body[16:20]))
+	}
+	msg.NumDocs = nDocs
+	// Try to parse first document in the reply
+	if len(body) > 20 {
+		docsBody := body[20:]
+		msg.BSONBody = bsonToJSON(docsBody)
 	}
 	msg.Summary = fmt.Sprintf("OP_REPLY (docs=%d, body=%d bytes)", nDocs, msg.BodySize)
 }
@@ -357,6 +378,296 @@ func skipBSONValue(data []byte, pos int, typ byte) int {
 		return pos + 16
 	}
 	return pos
+}
+
+// ---- BSON to JSON conversion ----
+
+// bsonToJSON parses a BSON document and returns a compact one-line JSON string.
+func bsonToJSON(data []byte) string {
+	m := bsonToMap(data)
+	if m == nil {
+		return ""
+	}
+	return mapToJSON(m)
+}
+
+// bsonToMap parses a BSON document into a Go map.
+func bsonToMap(data []byte) map[string]interface{} {
+	if len(data) < 5 {
+		return nil
+	}
+	docSize := int(binary.LittleEndian.Uint32(data[0:4]))
+	if docSize < 5 || docSize > len(data) {
+		docSize = len(data)
+	}
+	m := make(map[string]interface{})
+	pos := 4
+	for pos < docSize-1 {
+		if data[pos] == 0x00 {
+			break // end of document
+		}
+		key, val, next := parseBSONElement(data, pos)
+		if key != "" {
+			m[key] = val
+		}
+		if next <= pos {
+			break
+		}
+		pos = next
+	}
+	return m
+}
+
+// parseBSONElement parses a single BSON element at pos, returning key, value, nextPos.
+func parseBSONElement(data []byte, pos int) (string, interface{}, int) {
+	if pos >= len(data) {
+		return "", nil, pos
+	}
+	typ := data[pos]
+	pos++
+	// Read key (null-terminated)
+	keyStart := pos
+	for pos < len(data) && data[pos] != 0x00 {
+		pos++
+	}
+	if pos >= len(data) {
+		return "", nil, pos
+	}
+	key := string(data[keyStart:pos])
+	pos++ // skip null
+
+	nextPos := pos
+	var val interface{}
+
+	switch typ {
+	case 0x01: // double
+		if pos+8 <= len(data) {
+			bits := binary.LittleEndian.Uint64(data[pos : pos+8])
+			val = float64FromBits(bits)
+			nextPos = pos + 8
+		}
+	case 0x02: // string
+		if pos+4 <= len(data) {
+			length := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			end := pos + 4 + length
+			if end <= len(data) && length > 1 {
+				val = string(data[pos+4 : end-1])
+			} else if end <= len(data) {
+				val = ""
+			}
+			nextPos = end
+		}
+	case 0x03: // embedded document
+		if pos+4 <= len(data) {
+			docLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			end := pos + docLen
+			if end <= len(data) {
+				val = bsonToMap(data[pos:end])
+			}
+			nextPos = end
+		}
+	case 0x04: // array
+		if pos+4 <= len(data) {
+			arrLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			end := pos + arrLen
+			if end <= len(data) {
+				arr := bsonToMap(data[pos:end])
+				// Convert map to slice
+				slice := make([]interface{}, 0, len(arr))
+				for i := 0; ; i++ {
+					idx := strconv.Itoa(i)
+					if v, ok := arr[idx]; ok {
+						slice = append(slice, v)
+					} else {
+						break
+					}
+				}
+				val = slice
+			}
+			nextPos = end
+		}
+	case 0x05: // binary
+		if pos+5 <= len(data) {
+			binLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			end := pos + 5 + binLen
+			if end <= len(data) {
+				val = fmt.Sprintf("<binary %d bytes>", binLen)
+			}
+			nextPos = end
+		}
+	case 0x06: // undefined (deprecated)
+		val = "undefined"
+	case 0x07: // ObjectId
+		if pos+12 <= len(data) {
+			val = fmt.Sprintf("ObjectId(\"%x\")", data[pos:pos+12])
+			nextPos = pos + 12
+		}
+	case 0x08: // boolean
+		if pos < len(data) {
+			val = data[pos] != 0x00
+			nextPos = pos + 1
+		}
+	case 0x09: // UTC datetime
+		if pos+8 <= len(data) {
+			ms := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+			t := time.Unix(ms/1000, (ms%1000)*1e6).UTC()
+			val = t.Format("2006-01-02T15:04:05.000Z")
+			nextPos = pos + 8
+		}
+	case 0x0A: // null
+		val = nil
+	case 0x0B: // regex
+		// pattern(null-term)+options(null-term)
+		patEnd := pos
+		for patEnd < len(data) && data[patEnd] != 0x00 {
+			patEnd++
+		}
+		pat := string(data[pos:patEnd])
+		optStart := patEnd + 1
+		optEnd := optStart
+		for optEnd < len(data) && data[optEnd] != 0x00 {
+			optEnd++
+		}
+		opt := string(data[optStart:optEnd])
+		val = fmt.Sprintf("/%s/%s", pat, opt)
+		nextPos = optEnd + 1
+	case 0x0D: // JavaScript code
+		if pos+4 <= len(data) {
+			codeLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			end := pos + 4 + codeLen
+			if end <= len(data) && codeLen > 1 {
+				val = string(data[pos+4 : end-1])
+			}
+			nextPos = end
+		}
+	case 0x0F: // JavaScript code w/ scope
+		if pos+4 <= len(data) {
+			totalLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			end := pos + totalLen
+			if end <= len(data) {
+				val = "<javascript with scope>"
+			}
+			nextPos = end
+		}
+	case 0x10: // int32
+		if pos+4 <= len(data) {
+			val = int32(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			nextPos = pos + 4
+		}
+	case 0x11: // timestamp (internal)
+		if pos+8 <= len(data) {
+			val = int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+			nextPos = pos + 8
+		}
+	case 0x12: // int64
+		if pos+8 <= len(data) {
+			val = int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+			nextPos = pos + 8
+		}
+	case 0x13: // decimal128
+		if pos+16 <= len(data) {
+			val = fmt.Sprintf("<decimal128>")
+			nextPos = pos + 16
+		}
+	case 0x7F: // min key
+		val = "<MinKey>"
+	case 0xFF: // max key
+		val = "<MaxKey>"
+	default:
+		// unknown type - try to skip
+		nextPos = pos
+	}
+
+	if nextPos > len(data) {
+		nextPos = len(data)
+	}
+	return key, val, nextPos
+}
+
+// mapToJSON converts a map to compact JSON string.
+func mapToJSON(m map[string]interface{}) string {
+	var sb strings.Builder
+	writeJSONValue(&sb, m)
+	return sb.String()
+}
+
+func writeJSONValue(sb *strings.Builder, v interface{}) {
+	switch val := v.(type) {
+	case nil:
+		sb.WriteString("null")
+	case bool:
+		if val {
+			sb.WriteString("true")
+		} else {
+			sb.WriteString("false")
+		}
+	case int32:
+		sb.WriteString(strconv.FormatInt(int64(val), 10))
+	case int64:
+		sb.WriteString(strconv.FormatInt(val, 10))
+	case float64:
+		sb.WriteString(strconv.FormatFloat(val, 'f', -1, 64))
+	case string:
+		sb.WriteByte('"')
+		sb.WriteString(jsonEscape(val))
+		sb.WriteByte('"')
+	case map[string]interface{}:
+		sb.WriteByte('{')
+		first := true
+		for k, vv := range val {
+			if !first {
+				sb.WriteByte(',')
+			}
+			sb.WriteByte('"')
+			sb.WriteString(jsonEscape(k))
+			sb.WriteString("\":")
+			writeJSONValue(sb, vv)
+			first = false
+		}
+		sb.WriteByte('}')
+	case []interface{}:
+		sb.WriteByte('[')
+		for i, vv := range val {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			writeJSONValue(sb, vv)
+		}
+		sb.WriteByte(']')
+	case fmt.Stringer:
+		sb.WriteString(val.String())
+	default:
+		sb.WriteString(fmt.Sprintf("%q", fmt.Sprint(v)))
+	}
+}
+
+func jsonEscape(s string) string {
+	var sb strings.Builder
+	for _, c := range s {
+		switch c {
+		case '"':
+			sb.WriteString("\\\"")
+		case '\\':
+			sb.WriteString("\\\\")
+		case '\n':
+			sb.WriteString("\\n")
+		case '\r':
+			sb.WriteString("\\r")
+		case '\t':
+			sb.WriteString("\\t")
+		default:
+			if c < ' ' {
+				sb.WriteString(fmt.Sprintf("\\u%04x", c))
+			} else {
+				sb.WriteRune(c)
+			}
+		}
+	}
+	return sb.String()
+}
+
+func float64FromBits(bits uint64) float64 {
+	return math.Float64frombits(bits)
 }
 
 // DetectMongo checks if data looks like MongoDB wire protocol.

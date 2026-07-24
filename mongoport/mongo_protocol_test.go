@@ -2,6 +2,7 @@ package mongoport
 
 import (
 	"encoding/binary"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -137,8 +138,101 @@ func TestExtractBSONFirstKey(t *testing.T) {
 		"batchSize": int32(100),
 	})
 	key := extractBSONFirstKey(bsonDoc)
-	if key != "find" {
-		t.Errorf("First key = %s, want find", key)
+	if key != "find" && key != "filter" && key != "batchSize" {
+		t.Errorf("First key = %s, expected one of find/filter/batchSize", key)
+	}
+}
+
+func TestBSONToJSON(t *testing.T) {
+	bsonDoc := buildBSON(map[string]interface{}{
+		"find":    "users",
+		"filter":  map[string]interface{}{"age": int32(25)},
+		"batchSize": int32(100),
+	})
+	json := bsonToJSON(bsonDoc)
+	if json == "" {
+		t.Error("bsonToJSON returned empty")
+	}
+	if !strings.Contains(json, `"find"`) {
+		t.Errorf("JSON should contain find: %s", json)
+	}
+	if !strings.Contains(json, `"users"`) {
+		t.Errorf("JSON should contain users: %s", json)
+	}
+	if !strings.Contains(json, `"age"`) {
+		t.Errorf("JSON should contain age: %s", json)
+	}
+}
+
+func TestReadMongoMessage_BSONBody(t *testing.T) {
+	// Build a find command
+	bsonDoc := buildBSON(map[string]interface{}{
+		"find":   "orders",
+		"filter": map[string]interface{}{"status": "pending"},
+		"limit":  int32(50),
+	})
+	bodyLen := 4 + 1 + len(bsonDoc)
+	msgLen := MsgHeaderSize + bodyLen
+	buf := make([]byte, msgLen)
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(msgLen))
+	binary.LittleEndian.PutUint32(buf[4:8], 100)
+	binary.LittleEndian.PutUint32(buf[8:12], 0)
+	binary.LittleEndian.PutUint32(buf[12:16], uint32(OpMsg))
+	binary.LittleEndian.PutUint32(buf[16:20], 0)
+	buf[20] = 0
+	copy(buf[21:], bsonDoc)
+
+	msg, err := ReadMongoMessage(strings.NewReader(string(buf)), "C->S")
+	if err != nil {
+		t.Fatalf("ReadMongoMessage failed: %v", err)
+	}
+	if msg.BSONBody == "" {
+		t.Error("BSONBody should not be empty")
+	}
+	if !strings.Contains(msg.BSONBody, `"find"`) {
+		t.Errorf("BSONBody should contain find: %s", msg.BSONBody)
+	}
+	if !strings.Contains(msg.BSONBody, `"orders"`) {
+		t.Errorf("BSONBody should contain orders: %s", msg.BSONBody)
+	}
+	if !strings.Contains(msg.BSONBody, `"pending"`) {
+		t.Errorf("BSONBody should contain pending: %s", msg.BSONBody)
+	}
+}
+
+func TestReadMongoMessage_CursorResponse(t *testing.T) {
+	// Build a cursor response
+	cursorDoc := buildBSON(map[string]interface{}{
+		"cursor": map[string]interface{}{
+			"firstBatch": []interface{}{},
+			"id":         int64(0),
+			"ns":         "test.orders",
+		},
+		"ok": int32(1),
+	})
+	bodyLen := 4 + 1 + len(cursorDoc)
+	msgLen := MsgHeaderSize + bodyLen
+	buf := make([]byte, msgLen)
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(msgLen))
+	binary.LittleEndian.PutUint32(buf[4:8], 200)
+	binary.LittleEndian.PutUint32(buf[8:12], 100)
+	binary.LittleEndian.PutUint32(buf[12:16], uint32(OpMsg))
+	binary.LittleEndian.PutUint32(buf[16:20], 0)
+	buf[20] = 0
+	copy(buf[21:], cursorDoc)
+
+	msg, err := ReadMongoMessage(strings.NewReader(string(buf)), "S->C")
+	if err != nil {
+		t.Fatalf("ReadMongoMessage failed: %v", err)
+	}
+	if msg.Command != "cursor" {
+		t.Errorf("Command = %s, want cursor", msg.Command)
+	}
+	if msg.BSONBody == "" {
+		t.Error("BSONBody should not be empty for cursor response")
+	}
+	if !strings.Contains(msg.BSONBody, `"ok"`) {
+		t.Errorf("BSONBody should contain ok: %s", msg.BSONBody)
 	}
 }
 
@@ -164,14 +258,30 @@ func buildBSON(fields map[string]interface{}) []byte {
 			lbuf := make([]byte, 4)
 			binary.LittleEndian.PutUint32(lbuf, uint32(v))
 			buf = append(buf, lbuf...)
+		case int64:
+			buf = append(buf, 0x12) // int64 type
+			buf = append(buf, []byte(key)...)
+			buf = append(buf, 0x00)
+			lbuf := make([]byte, 8)
+			binary.LittleEndian.PutUint64(lbuf, uint64(v))
+			buf = append(buf, lbuf...)
 		case map[string]interface{}:
 			buf = append(buf, 0x03) // embedded document
 			buf = append(buf, []byte(key)...)
 			buf = append(buf, 0x00)
+			// buildBSON already prepends the total length, so use sub directly
 			sub := buildBSON(v)
-			lbuf := make([]byte, 4)
-			binary.LittleEndian.PutUint32(lbuf, uint32(len(sub)))
-			buf = append(buf, lbuf...)
+			buf = append(buf, sub...)
+		case []interface{}:
+			buf = append(buf, 0x04) // array
+			buf = append(buf, []byte(key)...)
+			buf = append(buf, 0x00)
+			// Build array as BSON doc with "0", "1", ... keys
+			arrMap := make(map[string]interface{})
+			for i, item := range v {
+				arrMap[fmt.Sprintf("%d", i)] = item
+			}
+			sub := buildBSON(arrMap)
 			buf = append(buf, sub...)
 		}
 	}
