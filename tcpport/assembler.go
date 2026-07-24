@@ -78,7 +78,7 @@ func (a *TCPAssembler) retrieveConnection(src, dst Endpoint, key string, init bo
 	if conn == nil && init {
 		conn = newTCPConnection(key)
 		a.connectionDict[key] = conn
-		a.connectionHandler.Handle(src, dst, conn)
+		go a.connectionHandler.Handle(src, dst, conn)
 	}
 	return conn
 }
@@ -207,6 +207,16 @@ func (s *netStream) confirmPacket(ack uint32) {
 	s.window.confirm(ack, s.c)
 }
 func (s *netStream) finish() { close(s.c) }
+
+// Prepend puts data at the front of the stream so the next Read returns it first.
+func (s *netStream) Prepend(data []byte) {
+	if len(data) > 0 {
+		buf := make([]byte, 0, len(data)+len(s.remain))
+		buf = append(buf, data...)
+		buf = append(buf, s.remain...)
+		s.remain = buf
+	}
+}
 
 func (s *netStream) Read(p []byte) (n int, err error) {
 	for len(s.remain) == 0 {

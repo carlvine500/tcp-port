@@ -483,11 +483,16 @@ type autoHandler struct {
 
 func (h *autoHandler) Handle(conn *tcpport.TCPConnection) {
 	h.conn = conn
-	// Peek at first bytes
-	peek, err := bufio.NewReader(conn.UpStream).Peek(24)
-	h.peekResult = peek
+	// Read first bytes for protocol detection, then prepend them back
+	// so the sub-handler can read them too.
+	buf := make([]byte, 24)
+	n, err := conn.UpStream.Read(buf)
+	h.peekResult = buf[:max(n, 0)]
 	h.peekErr = err
-	// Now run the real handler
+	// Put the data back for the sub-handler
+	if n > 0 {
+		conn.UpStream.Prepend(h.peekResult)
+	}
 	h.run()
 }
 
@@ -500,10 +505,10 @@ func (h *autoHandler) run() {
 	}{
 		{"dubbo", dubboport.DetectDubbo, func() TrafficHandler { return &dubboHandler{baseHandler: h.baseHandler} }},
 		{"triple", dubboport.DetectTriple, func() TrafficHandler { return &dubboHandler{baseHandler: h.baseHandler} }},
-		{"redis", redisport.DetectRESP, func() TrafficHandler { return &redisHandler{baseHandler: h.baseHandler} }},
 		{"rocketmq", rocketmqport.DetectRocketMQ, func() TrafficHandler { return &rocketmqHandler{baseHandler: h.baseHandler} }},
-		{"mysql", mysqlport.DetectMySQL, func() TrafficHandler { return &mysqlHandler{baseHandler: h.baseHandler} }},
 		{"mongo", mongoport.DetectMongo, func() TrafficHandler { return &mongoHandler{baseHandler: h.baseHandler} }},
+		{"mysql", mysqlport.DetectMySQL, func() TrafficHandler { return &mysqlHandler{baseHandler: h.baseHandler} }},
+		{"redis", redisport.DetectRESP, func() TrafficHandler { return &redisHandler{baseHandler: h.baseHandler} }},
 		{"http", httpport.DetectHTTP, func() TrafficHandler { return &httpHandler{baseHandler: h.baseHandler} }},
 	}
 
@@ -591,12 +596,21 @@ func main() {
 	// Select protocol
 	var proto *ProtocolHandler
 	if cfg.Protocol == "auto" || cfg.Protocol == "" {
-		// Use a multi-detector
+		// Use a multi-detector with fixed detection order
+		detectOrder := []tcpport.ProtocolDetector{
+			dubboport.DetectDubbo,
+			dubboport.DetectTriple,
+			rocketmqport.DetectRocketMQ,
+			mongoport.DetectMongo,
+			mysqlport.DetectMySQL,
+			redisport.DetectRESP,
+			httpport.DetectHTTP,
+		}
 		autoPH := &ProtocolHandler{
 			Name: "auto",
 			Detector: func(data []byte) bool {
-				for _, p := range protocols {
-					if p.Detector(data) {
+				for _, d := range detectOrder {
+					if d(data) {
 						return true
 					}
 				}
@@ -639,7 +653,7 @@ outer:
 				pkt.TransportLayer().LayerType() != layers.LayerTypeTCP {
 				continue
 			}
-				tcp := pkt.TransportLayer().(*layers.TCP)
+					tcp := pkt.TransportLayer().(*layers.TCP)
 			assembler.Assemble(pkt.NetworkLayer().NetworkFlow(), tcp, pkt.Metadata().Timestamp)
 		case <-ticker:
 			assembler.FlushOlderThan(time.Now().Add(time.Minute * -2))
