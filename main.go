@@ -724,10 +724,10 @@ func openDevice(device, ip string, port uint16) chan gopacket.Packet {
 	}
 	bpf := "tcp"
 	if port != 0 {
-		bpf += " port " + strconv.Itoa(int(port))
+		bpf += " and port " + strconv.Itoa(int(port))
 	}
 	if ip != "" {
-		bpf += " ip host " + ip
+		bpf += " and host " + ip
 	}
 	if err := handle.SetBPFFilter(bpf); err != nil {
 		logger.Warn("set filter failed:", err)
