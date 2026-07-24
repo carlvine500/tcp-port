@@ -1,25 +1,25 @@
 # tcp-port
 
-[English](./README.en.md)
+[中文](./README.md)
 
-**tcp-port** 是一个 Linux TCP 协议流量分析工具，基于 [gopacket](https://github.com/google/gopacket) 构建。它可以截获网卡上的 TCP 流量，自动重组 TCP 流，并解析以下 6 种常见后端协议：
+**tcp-port** is a Linux TCP protocol traffic analyzer built on [gopacket](https://github.com/google/gopacket). It captures TCP traffic on network interfaces, reassembles TCP streams, and decodes the following 6 common backend protocols:
 
-| 协议 | 支持版本 |
-|------|---------|
+| Protocol | Supported Versions |
+|----------|-------------------|
 | Dubbo | 2.x (Hessian2), 3.x (Triple / gRPC) |
 | Redis | RESP2 |
 | RocketMQ | Remoting Protocol |
-| MySQL | 8.x (客户端-服务端协议) |
-| MongoDB | 4.x+ (OP_MSG 等) |
+| MySQL | 8.x (client-server protocol) |
+| MongoDB | 4.x+ (OP_MSG, etc.) |
 | HTTP | 1.x |
 
-支持**自动协议检测**、**毫秒级时间戳**、**请求耗时统计**、**按协议分类导出**以及丰富的**协议内过滤**。
+Features: **auto protocol detection**, **millisecond-precision timestamps**, **request latency tracking**, **per-protocol file output**, and **rich protocol-specific filtering**.
 
 ---
 
-## 安装
+## Installation
 
-### 前置依赖
+### Prerequisites
 
 ```bash
 # Ubuntu / Debian
@@ -27,9 +27,31 @@ sudo apt-get install libpcap-dev
 
 # CentOS / RHEL
 sudo yum install libpcap-devel
+
+# macOS
+brew install libpcap
 ```
 
-### 源码编译
+### Pre-built Binaries
+
+Download the latest release from [GitHub Releases](https://github.com/carlvine500/tcp-port/releases):
+
+| Platform | Binary |
+|----------|--------|
+| Linux amd64 | `tcp-port-linux-amd64` |
+| Linux arm64 | `tcp-port-linux-arm64` |
+| macOS amd64 | `tcp-port-darwin-amd64` |
+| macOS arm64 | `tcp-port-darwin-arm64` |
+| Windows amd64 | `tcp-port-windows-amd64.exe` |
+
+```bash
+# Example: install on Linux amd64
+curl -L https://github.com/carlvine500/tcp-port/releases/latest/download/tcp-port-linux-amd64 -o tcp-port
+chmod +x tcp-port
+sudo mv tcp-port /usr/local/bin/
+```
+
+### Build from Source
 
 ```bash
 git clone https://github.com/carlvine500/tcp-port.git
@@ -38,25 +60,25 @@ go build -o tcp-port .
 sudo cp tcp-port /usr/local/bin/
 ```
 
-### go install
+Or with `go install`:
 
 ```bash
 go install github.com/carlvine500/tcp-port@latest
 ```
 
-> **注意**：抓包需要 root 权限或 `CAP_NET_RAW` capability。
+> **Note**: Packet capture requires root privileges or `CAP_NET_RAW` capability on Linux.
 
 ---
 
-## 快速开始
+## Quick Start
 
-### 1. 监控本机所有 TCP 流量（自动检测协议）
+### 1. Monitor all local TCP traffic (auto-detect protocols)
 
 ```bash
 sudo tcp-port
 ```
 
-输出示例：
+Sample output:
 
 ```
 2026-01-02 09:22:11.651
@@ -76,23 +98,23 @@ sudo tcp-port
   [4.87ms]
 ```
 
-每条请求-响应都有**毫秒时间戳**和**耗时统计**。
+Every request-response pair includes a **millisecond timestamp** and **latency** measurement.
 
-### 2. 只看某个端口
+### 2. Filter by port
 
 ```bash
 sudo tcp-port -port 6379
 ```
 
-### 3. 只看某个 IP
+### 3. Filter by IP
 
 ```bash
 sudo tcp-port -ip 172.17.0.3
 ```
 
-这非常适合监控 **Docker 容器内的 Java 进程**——无需进入容器，在宿主机上即可看到所有协议的通信。
+This is ideal for monitoring **Docker containers** — no need to exec into the container; capture all protocol traffic from the host.
 
-### 4. 指定协议
+### 4. Specify a protocol
 
 ```bash
 sudo tcp-port -protocol redis
@@ -104,17 +126,17 @@ sudo tcp-port -protocol http
 
 ---
 
-## 详细示例
+## Detailed Examples
 
 ### Dubbo
 
-**监控所有 Dubbo 调用：**
+**Monitor all Dubbo calls:**
 
 ```bash
 sudo tcp-port -protocol dubbo
 ```
 
-输出：
+Output:
 
 ```
 2026-01-02 09:30:00.123
@@ -126,28 +148,28 @@ sudo tcp-port -protocol dubbo
   [22.45ms]
 ```
 
-**过滤服务名和接口名：**
+**Filter by service and method:**
 
 ```bash
-# 只看 UserService
+# Only UserService
 sudo tcp-port -protocol dubbo -dubbo-service 'com.example.UserService'
 
-# 只看 find* 方法（通配符）
+# Methods starting with "find" (wildcard)
 sudo tcp-port -protocol dubbo -dubbo-method 'find*'
 
-# 组合过滤
+# Combined
 sudo tcp-port -protocol dubbo \
   -dubbo-service 'com.example.*' \
   -dubbo-method 'find*'
 ```
 
-**只输出 URL 摘要（最小输出）：**
+**URL summary only (minimal output):**
 
 ```bash
 sudo tcp-port -protocol dubbo -level url
 ```
 
-输出：
+Output:
 
 ```
 10.0.0.5:52001 -----> 10.0.0.6:20880  com.example.UserService  findById(long)
@@ -155,46 +177,46 @@ sudo tcp-port -protocol dubbo -level url
 
 ### Redis
 
-**监控所有 Redis 命令：**
+**Monitor all Redis commands:**
 
 ```bash
 sudo tcp-port -protocol redis
 ```
 
-**按命令过滤：**
+**Filter by command:**
 
 ```bash
-# 只看 SET 命令
+# Only SET commands
 sudo tcp-port -protocol redis -redis-command 'SET'
 
-# 只看 GET 和 HGET（通配符 *）
+# GET and HGET (wildcard)
 sudo tcp-port -protocol redis -redis-command 'GET*'
 ```
 
-**按 key 正则过滤：**
+**Filter by key regex:**
 
 ```bash
-# 只看 user: 开头的 key
+# Keys starting with "user:"
 sudo tcp-port -protocol redis -redis-key '^user:'
 
-# 只看 session 相关的 key
+# Session keys matching a digit pattern
 sudo tcp-port -protocol redis -redis-key '^session:\d+'
 
-# 只看某个前缀的 hash
+# Hash keys under a specific prefix
 sudo tcp-port -protocol redis -redis-key '^cache:product:'
 ```
 
-正则语法为标准 Go regexp (`regexp.Compile`)。
+The regex syntax is standard Go `regexp` (RE2).
 
 ### MySQL
 
-**监控所有 MySQL 查询：**
+**Monitor all MySQL queries:**
 
 ```bash
 sudo tcp-port -protocol mysql
 ```
 
-输出示例：
+Sample output:
 
 ```
 2026-01-02 09:35:10.201
@@ -206,38 +228,38 @@ sudo tcp-port -protocol mysql
   [17.11ms]
 ```
 
-**按查询内容过滤：**
+**Filter by query content:**
 
 ```bash
-# 只看包含 orders 的查询
+# Queries containing "orders"
 sudo tcp-port -protocol mysql -mysql-query 'orders'
 
-# 只看包含慢查询关键字的
+# Queries containing "JOIN"
 sudo tcp-port -protocol mysql -mysql-query 'JOIN'
 ```
 
-**按命令类型过滤：**
+**Filter by command type:**
 
 ```bash
-# 只看 Query 类命令
+# Only Query commands
 sudo tcp-port -protocol mysql -mysql-command 'Query'
 
-# 通配符
+# Wildcard for prepared statements
 sudo tcp-port -protocol mysql -mysql-command 'Stmt*'
 ```
 
 ### MongoDB
 
-**监控所有 MongoDB 操作：**
+**Monitor all MongoDB operations:**
 
 ```bash
 sudo tcp-port -protocol mongo
 ```
 
-**按 opcode 过滤：**
+**Filter by opcode:**
 
 ```bash
-# OP_MSG 通常是 CRUD 操作
+# OP_MSG (typically CRUD operations)
 sudo tcp-port -protocol mongo -mongo-opcode 2013
 
 # OP_QUERY
@@ -250,13 +272,13 @@ sudo tcp-port -protocol mongo -mongo-opcode 2004
 sudo tcp-port -protocol rocketmq
 ```
 
-**按 Request Code 过滤：**
+**Filter by request code:**
 
 ```bash
-# 只看 SEND_MESSAGE (code 10)
+# SEND_MESSAGE (code 10)
 sudo tcp-port -protocol rocketmq -rmq-code 10
 
-# 只看 PULL_MESSAGE (code 11)
+# PULL_MESSAGE (code 11)
 sudo tcp-port -protocol rocketmq -rmq-code 11
 ```
 
@@ -266,7 +288,7 @@ sudo tcp-port -protocol rocketmq -rmq-code 11
 sudo tcp-port -protocol http
 ```
 
-输出：
+Output:
 
 ```
 2026-01-02 09:40:05.500
@@ -280,19 +302,19 @@ sudo tcp-port -protocol http
 
 ---
 
-## Docker 容器监控（核心场景）
+## Docker Container Monitoring (Core Use Case)
 
-监控某个容器中 Java 进程的全部多协议流量：
+Monitor all multi-protocol traffic from a Java process inside a container:
 
 ```bash
-# 先找到容器 IP
+# Get the container IP
 docker inspect -f '{{.NetworkSettings.IPAddress}}' my-app
 
-# 监控该容器的所有流量，自动检测协议
+# Capture all traffic with auto-detection
 sudo tcp-port -ip 172.17.0.3 -protocol auto
 ```
 
-输出同时包含 Redis、MySQL、Dubbo、HTTP 等：
+Output spans Redis, MySQL, Dubbo, HTTP, etc.:
 
 ```
 2026-01-02 10:00:01.100
@@ -319,35 +341,35 @@ sudo tcp-port -ip 172.17.0.3 -protocol auto
 
 ---
 
-## 输出级别
+## Output Levels
 
-`-level` 控制输出详细程度：
+`-level` controls verbosity:
 
-| 级别 | 说明 |
-|------|------|
-| `url` | 只输出请求-响应的地址和方法（最精简） |
-| `header` | 输出请求头 + 响应头（默认） |
-| `all` | 输出完整内容，包括 body / payload |
+| Level | Description |
+|-------|-------------|
+| `url` | Request/response address and method only (most compact) |
+| `header` | Request header + response header (default) |
+| `all` | Full content including body / payload |
 
 ```bash
-# 最精简模式——只看调用链
+# Most compact — just the call chain
 sudo tcp-port -level url
 
-# 完整内容
+# Full content
 sudo tcp-port -level all
 ```
 
 ---
 
-## 分类导出到文件
+## Per-Protocol File Output
 
-使用 `-output-dir` 将不同协议的流量写入独立文件：
+Use `-output-dir` to write each protocol's traffic to separate files:
 
 ```bash
 sudo tcp-port -output-dir /tmp/tcpdump/
 ```
 
-运行后生成（已存在的同名文件会被覆盖）：
+This creates (existing files are overwritten):
 
 ```
 /tmp/tcpdump/
@@ -359,10 +381,7 @@ sudo tcp-port -output-dir /tmp/tcpdump/
 └── http.log
 ```
 
-每个文件内 `time.Now()` → `time.Now()` 耗时会持续更新并追加新请求。
-
-- 终端输出照常显示
-- 可以只导出不打印（`> /dev/null`），减少终端干扰：
+Terminal output continues as normal. To suppress it and only write files:
 
 ```bash
 sudo tcp-port -output-dir /tmp/tcpdump/ > /dev/null
@@ -370,97 +389,97 @@ sudo tcp-port -output-dir /tmp/tcpdump/ > /dev/null
 
 ---
 
-## 离线分析 pcap 文件
+## Offline PCAP Analysis
 
 ```bash
-# 从 pcap 文件读取
+# Read from a pcap file
 sudo tcp-port -file capture.pcap
 
-# 从 pcap 读取，只看 dubbo 协议
+# Read pcap, filter to dubbo only
 sudo tcp-port -file capture.pcap -protocol dubbo
 
-# 从 pcap 读取，导出到文件
+# Read pcap, export to files
 sudo tcp-port -file capture.pcap -output-dir ./output/
 ```
 
 ---
 
-## 完整命令行参数
+## Complete CLI Reference
 
 ```
 tcp-port [flags]
 
 GENERAL:
-  -protocol string    协议: auto, dubbo, redis, rocketmq, mysql, mongo, http (default: auto)
-  -level string       输出级别: url | header | all (default: header)
-  -ip string          按 IP 过滤
-  -port uint          按端口过滤 (default: 任意)
-  -device string      抓包网卡 (default: any)
-  -file string        从 pcap 文件读取
-  -output string      写入单个文件
-  -output-dir string  写入按协议分类的目录 (e.g. redis.log, mysql.log)
+  -protocol string    Protocol: auto, dubbo, redis, rocketmq, mysql, mongo, http (default: auto)
+  -level string       Output level: url | header | all (default: header)
+  -ip string          Filter by IP address
+  -port uint          Filter by port (default: any)
+  -device string      Capture interface (default: any)
+  -file string        Read from pcap file
+  -output string      Write to a single file
+  -output-dir string  Write per-protocol files to directory (e.g., redis.log, mysql.log)
 
 DUBBO:
-  -dubbo-service string  过滤服务名（通配符支持）
-  -dubbo-method string   过滤方法名（通配符支持）
+  -dubbo-service string  Filter by service name (wildcard)
+  -dubbo-method string   Filter by method name (wildcard)
 
 REDIS:
-  -redis-command string  过滤命令（SET, GET 等，通配符支持）
-  -redis-key string      按 key 正则过滤（Go regexp）
+  -redis-command string  Filter by command (SET, GET, etc.; wildcard)
+  -redis-key string      Filter by key (Go regexp)
 
 ROCKETMQ:
-  -rmq-code int          按请求码过滤
+  -rmq-code int          Filter by request code
 
 MYSQL:
-  -mysql-command string  按命令类型过滤（Query, Ping 等）
-  -mysql-query string    按查询内容过滤（子串匹配）
+  -mysql-command string  Filter by command type (Query, Ping, etc.)
+  -mysql-query string    Filter by query substring
 
 MONGODB:
-  -mongo-opcode int      按 opcode 过滤
+  -mongo-opcode int      Filter by opcode
 ```
 
 ---
 
-## 时间戳与耗时
+## Timestamps & Latency
 
-所有输出都带有毫秒精度的时间戳（`2006-01-02 15:04:05.000`），响应末尾显示耗时：
+All output includes millisecond-precision timestamps (`2006-01-02 15:04:05.000`), and responses show elapsed time:
 
 ```
-2026-01-02 09:22:11.651          ← 请求时间戳
+2026-01-02 09:22:11.651          ← request timestamp
 10.0.0.5:45123 -----> ...
   SET  user:1001  ...
-2026-01-02 09:22:11.654          ← 响应时间戳
+2026-01-02 09:22:11.654          ← response timestamp
 10.0.0.5:45123 <----- ...
   [SimpleString] OK
-  [3.12ms]                        ← 总耗时（请求→响应）
+  [3.12ms]                        ← total latency (request → response)
 ```
 
-> 耗时从收到请求第一个字节开始计时，到收到完整响应为止。
+> Latency is measured from the first byte of the request to the last byte of the response.
 
 ---
 
-## 工作原理
+## How It Works
 
 ```
 ┌─────────────────────────────────────────────┐
 │                   pcap (libpcap)             │
-│                  网络数据包捕获               │
+│                Packet capture                │
 └─────────────────┬───────────────────────────┘
                   │ TCP packets
 ┌─────────────────▼───────────────────────────┐
 │              TCP Assembler                   │
-│           TCP 流重组（双向）                  │
+│      Bidirectional TCP stream reassembly     │
 └─────────────────┬───────────────────────────┘
                   │ Ordered byte streams
 ┌─────────────────▼───────────────────────────┐
 │          Protocol Detector (auto)            │
-│    依次尝试 dubbo→triple→redis→rocketmq      │
-│         →mysql→mongo→http                   │
+│  Tries dubbo→triple→redis→rocketmq          │
+│        →mysql→mongo→http in order           │
 └─────────────────┬───────────────────────────┘
                   │ Detected protocol
 ┌─────────────────▼───────────────────────────┐
 │          Protocol Handler                    │
-│    解析协议消息 → 格式化 → MultiPrinter       │
+│   Parse → Format → MultiPrinter             │
 └─────────────────┬───────────────────────────┘
                   │
     ┌─────────────┼─────────────┐
@@ -470,12 +489,12 @@ MONGODB:
 
 ---
 
-## 要求
+## Requirements
 
-- **操作系统**：Linux（需要 `AF_PACKET` 支持）或 macOS
-- **权限**：root 或 `CAP_NET_RAW`
-- **依赖**：`libpcap`（安装见上方）
-- **Go**：1.22+（编译时）
+- **OS**: Linux (requires `AF_PACKET`), macOS, or Windows (Npcap)
+- **Privileges**: root or `CAP_NET_RAW` on Linux
+- **Dependencies**: `libpcap` (see prerequisites above)
+- **Go**: 1.22+ (build from source only)
 
 ---
 
