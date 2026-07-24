@@ -77,8 +77,12 @@ type DubboMessage struct {
 // ParseDubboBody performs best-effort parsing of Dubbo body to extract
 // service/method metadata without full deserialization.
 func (m *DubboMessage) ParseDubboBody() {
-	if m.Header.IsEvent {
-		m.MethodName = "[heartbeat]"
+	// For heartbeat events, still parse body to get service name
+	if m.Header.IsEvent && m.Header.IsRequest {
+		m.parseRequestMetadata()
+		if m.MethodName == "" {
+			m.MethodName = "heartbeat"
+		}
 		return
 	}
 
@@ -89,7 +93,7 @@ func (m *DubboMessage) ParseDubboBody() {
 		return
 	}
 
-	// Try to parse service/method from Hessian2 body (best effort)
+	// Normal request: parse service/method from body
 	m.parseRequestMetadata()
 }
 

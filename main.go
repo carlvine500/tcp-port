@@ -154,7 +154,10 @@ func (h *baseHandler) filterMethod(method string) bool {
 
 // ---- Dubbo Handler ----
 
-type dubboHandler struct{ baseHandler }
+type dubboHandler struct {
+	baseHandler
+	seen map[uint64]bool // dedup: key = (dstPort << 48) | (requestID & 0xFFFFFFFFFFFF)
+}
 
 func (h *dubboHandler) Handle(conn *tcpport.TCPConnection) {
 	defer conn.UpStream.Close()
@@ -183,6 +186,12 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 		if err != nil {
 			break
 		}
+		// Dedup: same request to same destination seen on multiple interfaces
+		dedupKey := uint64(h.Key.Dst.Port)<<48 | uint64(req.Header.RequestID)
+		if h.seen[dedupKey] {
+			continue
+		}
+		h.seen[dedupKey] = true
 		if h.filterService(req.ServiceName) || h.filterMethod(req.MethodName) {
 			continue
 		}
@@ -530,8 +539,8 @@ func (h *autoHandler) run() {
 		fn   tcpport.ProtocolDetector
 		make func() TrafficHandler
 	}{
-		{"dubbo", dubboport.DetectDubbo, func() TrafficHandler { return &dubboHandler{baseHandler: h.baseHandler} }},
-		{"triple", dubboport.DetectTriple, func() TrafficHandler { return &dubboHandler{baseHandler: h.baseHandler} }},
+		{"dubbo", dubboport.DetectDubbo, func() TrafficHandler { return &dubboHandler{baseHandler: h.baseHandler, seen: make(map[uint64]bool)} }},
+		{"triple", dubboport.DetectTriple, func() TrafficHandler { return &dubboHandler{baseHandler: h.baseHandler, seen: make(map[uint64]bool)} }},
 		{"rocketmq", rocketmqport.DetectRocketMQ, func() TrafficHandler { return &rocketmqHandler{baseHandler: h.baseHandler} }},
 		{"mongo", mongoport.DetectMongo, func() TrafficHandler { return &mongoHandler{baseHandler: h.baseHandler} }},
 		{"mysql", mysqlport.DetectMySQL, func() TrafficHandler { return &mysqlHandler{baseHandler: h.baseHandler} }},
@@ -580,7 +589,7 @@ func main() {
 			Name:     "dubbo",
 			Detector: dubboport.DetectDubbo,
 			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
-				return &dubboHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
+				return &dubboHandler{baseHandler: baseHandler{Key: ck, Config: cfg, Printer: p}, seen: make(map[uint64]bool)}
 			},
 		},
 		"redis": {
