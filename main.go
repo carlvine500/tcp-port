@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ type Config struct {
 	DubboService string
 	DubboMethod  string
 	RedisCommand string
+	RedisKey     string
 	RMQCode      int
 	MySQLCommand string
 	MySQLQuery   string
@@ -174,7 +176,10 @@ func (h *dubboHandler) handleTriple(reqR, respR *bufio.Reader) {
 
 // ---- Redis Handler ----
 
-type redisHandler struct{ baseHandler }
+type redisHandler struct {
+	baseHandler
+	keyRe *regexp.Regexp
+}
 
 func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 	defer conn.UpStream.Close()
@@ -184,6 +189,10 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 	respR := bufio.NewReader(conn.DownStream)
 	defer tcpport.DiscardAll(respR)
 
+	if h.Config.RedisKey != "" {
+		h.keyRe = regexp.MustCompile(h.Config.RedisKey)
+	}
+
 	for {
 		h.initBuf()
 		cmd, err := redisport.ReadRESPCommand(reqR)
@@ -192,6 +201,16 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 		}
 		if h.Config.RedisCommand != "" && !tcpport.WildcardMatch(strings.ToUpper(cmd.Command), strings.ToUpper(h.Config.RedisCommand)) {
 			continue
+		}
+		// Filter by key regex
+		if h.keyRe != nil {
+			key := ""
+			if len(cmd.Args) > 1 {
+				key = cmd.Args[1]
+			}
+			if !h.keyRe.MatchString(key) {
+				continue
+			}
 		}
 		if h.Config.Level == "url" {
 			h.writeLine(redisport.FormatRESPURL(cmd, h.Key.SrcString(), h.Key.DstString()))
@@ -437,7 +456,7 @@ func main() {
 			Name:     "redis",
 			Detector: redisport.DetectRESP,
 			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.Printer) TrafficHandler {
-				return &redisHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
+				return &redisHandler{baseHandler: baseHandler{Key: ck, Config: cfg, Printer: p}}
 			},
 		},
 		"rocketmq": {
@@ -549,6 +568,7 @@ func parseFlags() *Config {
 	fs.StringVar(&cfg.DubboService, "dubbo-service", "", "Dubbo: filter by service name (wildcard)")
 	fs.StringVar(&cfg.DubboMethod, "dubbo-method", "", "Dubbo: filter by method name (wildcard)")
 	fs.StringVar(&cfg.RedisCommand, "redis-command", "", "Redis: filter by command (SET, GET, etc.)")
+	fs.StringVar(&cfg.RedisKey, "redis-key", "", "Redis: filter by key (regex pattern)")
 	fs.IntVar(&cfg.RMQCode, "rmq-code", 0, "RocketMQ: filter by request code")
 	fs.StringVar(&cfg.MySQLCommand, "mysql-command", "", "MySQL: filter by command (Query, Ping, etc.)")
 	fs.StringVar(&cfg.MySQLQuery, "mysql-query", "", "MySQL: filter by query substring")
