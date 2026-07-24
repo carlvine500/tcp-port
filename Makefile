@@ -1,4 +1,4 @@
-BINARY := tcp-port
+BINARY := tcpshow
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
@@ -19,7 +19,7 @@ endef
 all: build
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
+	go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY) .
 
 dist:
 	@rm -rf dist && mkdir -p dist
@@ -36,6 +36,6 @@ clean:
 release: dist
 	@echo "Creating release $(VERSION)..."
 	gh release create $(VERSION) dist/* \
-		--title "tcp-port $(VERSION)" \
+		--title "tcpshow $(VERSION)" \
 		--notes "Cross-platform release. Binaries for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64."
 	@echo "Release $(VERSION) published."

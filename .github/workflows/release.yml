@@ -18,17 +18,17 @@ jobs:
           - os: linux
             arch: amd64
             runner: ubuntu-latest
-            artifact: tcp-port-linux-amd64
+            artifact: tcpshow-linux-amd64
             ext: ""
           - os: linux
             arch: arm64
             runner: ubuntu-24.04-arm
-            artifact: tcp-port-linux-arm64
+            artifact: tcpshow-linux-arm64
             ext: ""
           - os: darwin
             arch: arm64
             runner: macos-latest
-            artifact: tcp-port-darwin-arm64
+            artifact: tcpshow-darwin-arm64
             ext: ""
 
     steps:
@@ -70,7 +70,6 @@ jobs:
         run: |
           cat > Dockerfile.centos7 << 'DOCKEREOF'
           FROM centos:7
-          # CentOS 7 EOL — use vault archives
           RUN sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*.repo && \
               sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo && \
               yum install -y epel-release && \
@@ -83,18 +82,18 @@ jobs:
           ENV PATH="/usr/local/go/bin:$PATH"
           WORKDIR /build
           COPY . .
-          RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o tcp-port-centos7 .
+          RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o tcpshow-centos7 .
           DOCKEREOF
-          docker build -f Dockerfile.centos7 -t tcp-port-centos7 .
-          docker create --name tmp tcp-port-centos7
-          docker cp tmp:/build/tcp-port-centos7 ./tcp-port-linux-amd64-centos7
+          docker build -f Dockerfile.centos7 -t tcpshow-centos7 .
+          docker create --name tmp tcpshow-centos7
+          docker cp tmp:/build/tcpshow-centos7 ./tcpshow-linux-amd64-centos7
           docker rm tmp
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tcp-port-linux-amd64-centos7
-          path: tcp-port-linux-amd64-centos7
+          name: tcpshow-linux-amd64-centos7
+          path: tcpshow-linux-amd64-centos7
 
   release:
     name: Create Release
@@ -104,7 +103,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: tcp-port-*
+          pattern: tcpshow-*
           merge-multiple: true
 
       - name: Create Release

@@ -19,49 +19,53 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/hsiafan/vlog"
 
-	"github.com/carlvine500/tcp-port/dubboport"
-	"github.com/carlvine500/tcp-port/httpport"
-	"github.com/carlvine500/tcp-port/mongoport"
-	"github.com/carlvine500/tcp-port/mysqlport"
-	"github.com/carlvine500/tcp-port/redisport"
-	"github.com/carlvine500/tcp-port/rocketmqport"
-	"github.com/carlvine500/tcp-port/tcpport"
+	"github.com/carlvine500/tcpshow/dubboport"
+	"github.com/carlvine500/tcpshow/httpport"
+	"github.com/carlvine500/tcpshow/mongoport"
+	"github.com/carlvine500/tcpshow/mysqlport"
+	"github.com/carlvine500/tcpshow/redisport"
+	"github.com/carlvine500/tcpshow/rocketmqport"
+	"github.com/carlvine500/tcpshow/tcpport"
 )
 
 var logger = vlog.CurrentPackageLogger()
+var version = "0.2.0"
 
 func init() { logger.SetAppenders(vlog.NewConsole2Appender()) }
 
-// Config holds all CLI flags.
-type Config struct {
-	Level     string
+// ---- Config ----
+
+// GlobalConfig holds global CLI flags (before subcommand).
+type GlobalConfig struct {
+	Interface string
 	IP        string
 	Port      uint16
-	Device    string
-	File      string
-	Output    string
 	OutputDir string
-	Protocol  string // dubbo, redis, rocketmq, mysql, mongo, auto
+	Level     string
+	PcapFile  string
+	Cost      string // global cost filter
+}
 
-	// Protocol-specific filters
+// ProtoConfig holds protocol-specific flags.
+type ProtoConfig struct {
+	Protocol string // dubbo, redis, mysql, mongo, rocketmq, http
+
 	DubboService string
 	DubboMethod  string
-	RedisCommand string
 	RedisKey     string
+	RedisCommand string
 	RMQCode      int
 	MySQLCommand string
 	MySQLQuery   string
 	MongoOpCode  int
+	Cost         string
+
+	// Compiled
+	keyRe *regexp.Regexp
 }
 
-// ProtocolHandler is a factory for creating traffic handlers for a protocol.
-type ProtocolHandler struct {
-	Name     string
-	Detector tcpport.ProtocolDetector
-	Handler  func(ck ConnectionKey, cfg *Config, printer *tcpport.MultiPrinter) TrafficHandler
-}
+// ---- Types for handlers ----
 
-// ConnectionKey identifies a connection.
 type ConnectionKey struct {
 	Src tcpport.Endpoint
 	Dst tcpport.Endpoint
@@ -70,93 +74,111 @@ type ConnectionKey struct {
 func (ck ConnectionKey) SrcString() string { return ck.Src.String() }
 func (ck ConnectionKey) DstString() string { return ck.Dst.String() }
 
-// TrafficHandler processes protocol traffic on a connection.
 type TrafficHandler interface {
 	Handle(conn *tcpport.TCPConnection)
 }
 
-// ---- Base handler with common helpers ----
-
 type baseHandler struct {
-	Key     ConnectionKey
-	Config  *Config
-	Printer *tcpport.MultiPrinter
-	Buf     *bytes.Buffer
-
-	// Timing
+	Key      ConnectionKey
+	Global   *GlobalConfig
+	Proto    *ProtoConfig
+	Printer  *tcpport.MultiPrinter
+	Buf      *bytes.Buffer
 	reqTime  time.Time
-	protocol string // for file routing
+	protocol string
 }
 
 func (h *baseHandler) initBuf() { h.Buf = new(bytes.Buffer) }
 
-// nowStr returns current time formatted as "2006-01-02 15:04:05.000".
-func nowStr() string {
-	return time.Now().Format("2006-01-02 15:04:05.000")
-}
+func (h *baseHandler) startReq() { h.reqTime = time.Now() }
 
-// markReq captures the current time and returns the formatted timestamp.
-func (h *baseHandler) markReq() string {
-	h.reqTime = time.Now()
-	return h.reqTime.Format("2006-01-02 15:04:05.000")
-}
-
-// elapsed returns the duration since markReq was called.
-func (h *baseHandler) elapsed() string {
-	d := time.Since(h.reqTime)
-	return fmt.Sprintf("%.2fms", float64(d.Microseconds())/1000)
-}
-
-// send queues output with protocol routing.
-func (h *baseHandler) send() {
-	h.Printer.Send(h.protocol, h.Buf.String())
-}
-
-// startReq captures the current time for elapsed calculation.
-func (h *baseHandler) startReq() {
-	h.reqTime = time.Now()
-}
-
-// writeReqLine writes the request direction line: "timestamp [src -----> dst]"
 func (h *baseHandler) writeReqLine(src, dst string) {
 	ts := h.reqTime.Format("2006-01-02 15:04:05.000")
 	fmt.Fprintf(h.Buf, "%s [%s -----> %s]\n", ts, src, dst)
 }
 
-// writeRespLine writes the response direction line with elapsed: "timestamp [src <----- dst] (Xms)"
 func (h *baseHandler) writeRespLine(src, dst string) {
 	ts := h.reqTime.Format("2006-01-02 15:04:05.000")
 	fmt.Fprintf(h.Buf, "%s [%s <----- %s] (%dms)\n", ts, dst, src, time.Since(h.reqTime).Milliseconds())
 }
 
-// hasContent returns true if the buffer has any content.
-func (h *baseHandler) hasContent() bool {
-	return h.Buf.Len() > 0
-}
+func (h *baseHandler) hasContent() bool { return h.Buf.Len() > 0 }
 
-func (h *baseHandler) writeLine(a ...interface{}) {
-	fmt.Fprintln(h.Buf, a...)
-}
+func (h *baseHandler) send() { h.Printer.Send(h.protocol, h.Buf.String()) }
 
-func (h *baseHandler) filterService(service string) bool {
-	if h.Config.DubboService != "" && !tcpport.WildcardMatch(service, h.Config.DubboService) {
+func (h *baseHandler) writeLine(a ...interface{}) { fmt.Fprintln(h.Buf, a...) }
+
+func (h *baseHandler) elapsed() time.Duration { return time.Since(h.reqTime) }
+
+func (h *baseHandler) elapsedMs() int64 { return h.elapsed().Milliseconds() }
+
+// checkCost returns true if the response should be shown based on cost filter.
+func (h *baseHandler) checkCost() bool {
+	if h.Proto.Cost == "" {
 		return true
 	}
-	return false
+	ms := h.elapsedMs()
+	return matchCost(ms, h.Proto.Cost)
 }
 
-func (h *baseHandler) filterMethod(method string) bool {
-	if h.Config.DubboMethod != "" && !tcpport.WildcardMatch(method, h.Config.DubboMethod) {
+// matchCost parses cost filter expressions:
+//
+//	"100+"  → >= 100ms
+//	"100-"  → <= 100ms
+//	"50-200" → 50ms <= t <= 200ms
+func matchCost(ms int64, filter string) bool {
+	filter = strings.TrimSpace(filter)
+	if filter == "" {
 		return true
 	}
-	return false
+	// "100+" or "+100"
+	if strings.HasSuffix(filter, "+") {
+		threshold, err := strconv.ParseInt(strings.TrimSuffix(filter, "+"), 10, 64)
+		if err == nil {
+			return ms >= threshold
+		}
+	}
+	if strings.HasPrefix(filter, "+") {
+		threshold, err := strconv.ParseInt(strings.TrimPrefix(filter, "+"), 10, 64)
+		if err == nil {
+			return ms >= threshold
+		}
+	}
+	// "100-" or "-100"
+	if strings.HasSuffix(filter, "-") {
+		threshold, err := strconv.ParseInt(strings.TrimSuffix(filter, "-"), 10, 64)
+		if err == nil {
+			return ms <= threshold
+		}
+	}
+	if strings.HasPrefix(filter, "-") && !strings.Contains(filter[1:], "-") {
+		threshold, err := strconv.ParseInt(filter[1:], 10, 64)
+		if err == nil {
+			return ms <= threshold
+		}
+	}
+	// "50-200"
+	if strings.Contains(filter, "-") {
+		parts := strings.SplitN(filter, "-", 2)
+		minVal, err1 := strconv.ParseInt(parts[0], 10, 64)
+		maxVal, err2 := strconv.ParseInt(parts[1], 10, 64)
+		if err1 == nil && err2 == nil {
+			return ms >= minVal && ms <= maxVal
+		}
+	}
+	// Exact match
+	threshold, err := strconv.ParseInt(filter, 10, 64)
+	if err == nil {
+		return ms == threshold
+	}
+	return true
 }
 
 // ---- Dubbo Handler ----
 
 type dubboHandler struct {
 	baseHandler
-	seen map[uint64]bool // dedup: key = (dstPort << 48) | (requestID & 0xFFFFFFFFFFFF)
+	seen map[uint64]bool
 }
 
 func (h *dubboHandler) Handle(conn *tcpport.TCPConnection) {
@@ -169,7 +191,6 @@ func (h *dubboHandler) Handle(conn *tcpport.TCPConnection) {
 	respR := bufio.NewReader(conn.DownStream)
 	defer tcpport.DiscardAll(respR)
 
-	// Detect dubbo vs triple
 	peek, _ := reqR.Peek(24)
 	if dubboport.DetectDubbo(peek) {
 		h.handleDubbo(reqR, respR)
@@ -179,6 +200,13 @@ func (h *dubboHandler) Handle(conn *tcpport.TCPConnection) {
 }
 
 func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
+	filterService := func(s string) bool {
+		return h.Proto.DubboService != "" && !tcpport.WildcardMatch(s, h.Proto.DubboService)
+	}
+	filterMethod := func(s string) bool {
+		return h.Proto.DubboMethod != "" && !tcpport.WildcardMatch(s, h.Proto.DubboMethod)
+	}
+
 	for {
 		h.initBuf()
 		h.startReq()
@@ -186,17 +214,16 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 		if err != nil {
 			break
 		}
-		// Dedup: same request to same destination seen on multiple interfaces
 		dedupKey := uint64(h.Key.Dst.Port)<<48 | uint64(req.Header.RequestID)
 		if h.seen[dedupKey] {
 			continue
 		}
 		h.seen[dedupKey] = true
-		if h.filterService(req.ServiceName) || h.filterMethod(req.MethodName) {
+		if filterService(req.ServiceName) || filterMethod(req.MethodName) {
 			continue
 		}
 		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
-		if h.Config.Level == "url" {
+		if h.Global.Level == "url" {
 			h.writeLine(dubboport.FormatDubboURL(req))
 		} else {
 			h.writeLine(dubboport.FormatDubbo(req))
@@ -209,7 +236,11 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 		if err != nil {
 			break
 		}
-		if h.Config.Level != "url" {
+		if !h.checkCost() {
+			h.send() // flush empty to reset buf
+			continue
+		}
+		if h.Global.Level != "url" {
 			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
 			h.writeLine(dubboport.FormatDubbo(resp))
 		}
@@ -221,15 +252,22 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 }
 
 func (h *dubboHandler) handleTriple(reqR, respR *bufio.Reader) {
+	filterService := func(s string) bool {
+		return h.Proto.DubboService != "" && !tcpport.WildcardMatch(s, h.Proto.DubboService)
+	}
+	filterMethod := func(s string) bool {
+		return h.Proto.DubboMethod != "" && !tcpport.WildcardMatch(s, h.Proto.DubboMethod)
+	}
+
 	h.initBuf()
 	h.startReq()
 	msgs, _, _ := dubboport.ReadTripleMessages(reqR)
 	for _, msg := range msgs {
-		if h.filterService(msg.ServiceName) || h.filterMethod(msg.MethodName) {
+		if filterService(msg.ServiceName) || filterMethod(msg.MethodName) {
 			continue
 		}
 		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
-		if h.Config.Level == "url" {
+		if h.Global.Level == "url" {
 			h.writeLine(dubboport.FormatTripleURL(&msg))
 		} else {
 			h.writeLine(dubboport.FormatTriple(&msg))
@@ -244,7 +282,6 @@ func (h *dubboHandler) handleTriple(reqR, respR *bufio.Reader) {
 
 type redisHandler struct {
 	baseHandler
-	keyRe *regexp.Regexp
 }
 
 func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
@@ -256,8 +293,8 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 	respR := bufio.NewReader(conn.DownStream)
 	defer tcpport.DiscardAll(respR)
 
-	if h.Config.RedisKey != "" {
-		h.keyRe = regexp.MustCompile(h.Config.RedisKey)
+	if h.Proto.RedisKey != "" {
+		h.Proto.keyRe = regexp.MustCompile(h.Proto.RedisKey)
 	}
 
 	for {
@@ -267,25 +304,22 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 		if err != nil {
 			break
 		}
-		if h.Config.RedisCommand != "" && !tcpport.WildcardMatch(strings.ToUpper(cmd.Command), strings.ToUpper(h.Config.RedisCommand)) {
-			// Consume response to keep streams in sync
+		if h.Proto.RedisCommand != "" && !tcpport.WildcardMatch(strings.ToUpper(cmd.Command), strings.ToUpper(h.Proto.RedisCommand)) {
 			redisport.ReadRESPResponse(respR)
 			continue
 		}
-		// Filter by key regex
-		if h.keyRe != nil {
+		if h.Proto.keyRe != nil {
 			key := ""
 			if len(cmd.Args) > 1 {
 				key = cmd.Args[1]
 			}
-			if !h.keyRe.MatchString(key) {
-				// Consume response to keep streams in sync
+			if !h.Proto.keyRe.MatchString(key) {
 				redisport.ReadRESPResponse(respR)
 				continue
 			}
 		}
 		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
-		if h.Config.Level == "url" {
+		if h.Global.Level == "url" {
 			h.writeLine(redisport.FormatRESPURL(cmd))
 		} else {
 			h.writeLine(redisport.FormatRESPCommand(cmd))
@@ -295,7 +329,10 @@ func (h *redisHandler) Handle(conn *tcpport.TCPConnection) {
 			h.send()
 			break
 		}
-		if h.Config.Level != "url" {
+		if !h.checkCost() {
+			continue
+		}
+		if h.Global.Level != "url" {
 			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
 			h.writeLine(redisport.FormatRESPResponse(resp))
 		}
@@ -326,11 +363,11 @@ func (h *rocketmqHandler) Handle(conn *tcpport.TCPConnection) {
 		if err != nil {
 			break
 		}
-		if h.Config.RMQCode != 0 && req.Code != h.Config.RMQCode {
+		if h.Proto.RMQCode != 0 && req.Code != h.Proto.RMQCode {
 			continue
 		}
 		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
-		if h.Config.Level == "url" {
+		if h.Global.Level == "url" {
 			h.writeLine(rocketmqport.FormatRemotingURL(req))
 		} else {
 			h.writeLine(rocketmqport.FormatRemotingCommand(req))
@@ -340,7 +377,10 @@ func (h *rocketmqHandler) Handle(conn *tcpport.TCPConnection) {
 			h.send()
 			break
 		}
-		if h.Config.Level != "url" {
+		if !h.checkCost() {
+			continue
+		}
+		if h.Global.Level != "url" {
 			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
 			h.writeLine(rocketmqport.FormatRemotingResponse(resp))
 		}
@@ -368,7 +408,7 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 	h.initBuf()
 	h.startReq()
 	if msg, err := mysqlport.ReadMySQLMessage(serverR, "S->C"); err == nil {
-		if h.Config.Level == "url" {
+		if h.Global.Level == "url" {
 			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
 			h.writeLine(mysqlport.FormatMySQLURL(msg))
 		} else if msg.Type == "handshake" {
@@ -385,14 +425,14 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 		if err != nil {
 			break
 		}
-		if h.Config.MySQLCommand != "" && !tcpport.WildcardMatch(strings.ToUpper(cmd.CommandName), strings.ToUpper(h.Config.MySQLCommand)) {
+		if h.Proto.MySQLCommand != "" && !tcpport.WildcardMatch(strings.ToUpper(cmd.CommandName), strings.ToUpper(h.Proto.MySQLCommand)) {
 			continue
 		}
-		if h.Config.MySQLQuery != "" && !strings.Contains(cmd.Query, h.Config.MySQLQuery) {
+		if h.Proto.MySQLQuery != "" && !strings.Contains(cmd.Query, h.Proto.MySQLQuery) {
 			continue
 		}
 		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
-		if h.Config.Level == "url" {
+		if h.Global.Level == "url" {
 			h.writeLine(mysqlport.FormatMySQLURL(cmd))
 		} else {
 			h.writeLine(mysqlport.FormatMySQLMessage(cmd))
@@ -402,7 +442,7 @@ func (h *mysqlHandler) Handle(conn *tcpport.TCPConnection) {
 			if err != nil {
 				break
 			}
-			if h.Config.Level != "url" {
+			if h.Global.Level != "url" && h.checkCost() {
 				h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
 				h.writeLine(mysqlport.FormatMySQLMessage(resp))
 			}
@@ -437,11 +477,11 @@ func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 		if err != nil {
 			break
 		}
-		if h.Config.MongoOpCode != 0 && req.Header.OpCode != int32(h.Config.MongoOpCode) {
+		if h.Proto.MongoOpCode != 0 && req.Header.OpCode != int32(h.Proto.MongoOpCode) {
 			continue
 		}
 		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
-		if h.Config.Level == "url" {
+		if h.Global.Level == "url" {
 			h.writeLine(mongoport.FormatMongoURL(req))
 		} else {
 			h.writeLine(mongoport.FormatMongoMessage(req))
@@ -451,7 +491,7 @@ func (h *mongoHandler) Handle(conn *tcpport.TCPConnection) {
 			if err != nil {
 				break
 			}
-			if h.Config.Level != "url" {
+			if h.Global.Level != "url" {
 				h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
 				h.writeLine(mongoport.FormatMongoResponse(resp))
 			}
@@ -484,7 +524,7 @@ func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 			break
 		}
 		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
-		if h.Config.Level == "url" {
+		if h.Global.Level == "url" {
 			h.writeLine(httpport.FormatHTTPURL(req))
 		} else {
 			h.writeLine(httpport.FormatHTTP(req))
@@ -494,7 +534,7 @@ func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 			h.send()
 			break
 		}
-		if h.Config.Level != "url" {
+		if h.checkCost() && h.Global.Level != "url" {
 			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
 			h.writeLine(httpport.FormatHTTP(resp))
 		}
@@ -505,7 +545,7 @@ func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 	}
 }
 
-// ---- Auto-detect multi-handler ----
+// ---- Auto-detect handler ----
 
 type autoHandler struct {
 	baseHandler
@@ -519,13 +559,10 @@ type autoHandler struct {
 
 func (h *autoHandler) Handle(conn *tcpport.TCPConnection) {
 	h.conn = conn
-	// Read first bytes for protocol detection, then prepend them back
-	// so the sub-handler can read them too.
 	buf := make([]byte, 24)
 	n, err := conn.UpStream.Read(buf)
 	h.peekResult = buf[:max(n, 0)]
 	h.peekErr = err
-	// Put the data back for the sub-handler
 	if n > 0 {
 		conn.UpStream.Prepend(h.peekResult)
 	}
@@ -533,7 +570,6 @@ func (h *autoHandler) Handle(conn *tcpport.TCPConnection) {
 }
 
 func (h *autoHandler) run() {
-	// Try detectors in order
 	detectors := []struct {
 		name string
 		fn   tcpport.ProtocolDetector
@@ -565,74 +601,328 @@ func (h *autoHandler) run() {
 // ---- ConnectionHandler adapter ----
 
 type connHandlerAdapter struct {
-	cfg     *Config
+	global  *GlobalConfig
+	proto   *ProtoConfig
 	printer *tcpport.MultiPrinter
-	proto   *ProtocolHandler
+	makeH   func(ck ConnectionKey) TrafficHandler
 }
 
 func (a *connHandlerAdapter) Handle(src, dst tcpport.Endpoint, conn *tcpport.TCPConnection) {
 	ck := ConnectionKey{Src: src, Dst: dst}
-	handler := a.proto.Handler(ck, a.cfg, a.printer)
+	handler := a.makeH(ck)
 	handler.Handle(conn)
 }
 
 func (a *connHandlerAdapter) Finish() {}
 
+// ---- Subcommand definitions ----
+
+type subcommand struct {
+	Name        string
+	Description string
+	Aliases     []string
+	Setup       func(fs *flag.FlagSet, proto *ProtoConfig)
+	Examples    []string
+}
+
+var subcommands = []subcommand{
+	{
+		Name: "dubbo", Description: "Capture Dubbo/Triple RPC traffic",
+		Aliases: []string{"d"},
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.StringVar(&p.DubboService, "s", "", "Filter by service name (wildcard)")
+			fs.StringVar(&p.DubboService, "service", "", "Filter by service name (wildcard)")
+			fs.StringVar(&p.DubboMethod, "m", "", "Filter by method name (wildcard)")
+			fs.StringVar(&p.DubboMethod, "method", "", "Filter by method name (wildcard)")
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow dubbo",
+			"  tcpshow dubbo -s com.example.* -m getUser",
+			"  tcpshow dubbo -C 100+",
+		},
+	},
+	{
+		Name: "redis", Description: "Capture Redis RESP traffic",
+		Aliases: []string{"r"},
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.StringVar(&p.RedisKey, "k", "", "Filter by key (regex)")
+			fs.StringVar(&p.RedisKey, "key", "", "Filter by key (regex)")
+			fs.StringVar(&p.RedisCommand, "c", "", "Filter by command: SET, GET, ...")
+			fs.StringVar(&p.RedisCommand, "cmd", "", "Filter by command: SET, GET, ...")
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow redis",
+			"  tcpshow redis -k 'user:session:*'",
+			"  tcpshow redis -c GET -C 50+",
+		},
+	},
+	{
+		Name: "mysql", Description: "Capture MySQL traffic",
+		Aliases: []string{"m"},
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.StringVar(&p.MySQLCommand, "c", "", "Filter by command: Query, Ping, ...")
+			fs.StringVar(&p.MySQLCommand, "cmd", "", "Filter by command: Query, Ping, ...")
+			fs.StringVar(&p.MySQLQuery, "q", "", "Filter by SQL substring")
+			fs.StringVar(&p.MySQLQuery, "query", "", "Filter by SQL substring")
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow mysql",
+			"  tcpshow mysql -q tableName -C 100+",
+			"  tcpshow mysql -q 'SELECT.*FROM users'",
+		},
+	},
+	{
+		Name: "mongo", Description: "Capture MongoDB wire protocol traffic",
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.IntVar(&p.MongoOpCode, "opcode", 0, "Filter by opcode (2013=OP_MSG, 2004=OP_QUERY)")
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow mongo",
+			"  tcpshow mongo -C 200+",
+		},
+	},
+	{
+		Name: "rocketmq", Description: "Capture RocketMQ Remoting traffic",
+		Aliases: []string{"rmq"},
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.IntVar(&p.RMQCode, "code", 0, "Filter by request code")
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow rocketmq",
+			"  tcpshow rocketmq --code 10 -C 50+",
+		},
+	},
+	{
+		Name: "http", Description: "Capture HTTP/1.x traffic",
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow http",
+			"  tcpshow http -C 500+",
+		},
+	},
+}
+
+// ---- CLI Framework ----
+
+func findSubcommand(args []string) (subIndex int) {
+	for i, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return i
+		}
+		if a == "-h" || a == "--help" {
+			return -1 // help flag, no subcommand search
+		}
+	}
+	return len(args) // no subcommand
+}
+
+func subcommandByName(name string) *subcommand {
+	for i := range subcommands {
+		if subcommands[i].Name == name {
+			return &subcommands[i]
+		}
+		for _, alias := range subcommands[i].Aliases {
+			if alias == name {
+				return &subcommands[i]
+			}
+		}
+	}
+	return nil
+}
+
+func printGlobalHelp() {
+	fmt.Printf(`tcpshow - TCP traffic sniffer for Dubbo, Redis, MySQL, MongoDB, RocketMQ, HTTP
+
+USAGE:
+  tcpshow [global-flags] [protocol] [protocol-flags]
+  tcpshow -h
+
+GLOBAL FLAGS:
+  -i <iface>      Network interface (default: any)
+  -r <file>       Read from pcap file
+  --ip <ip>       Filter by IP address
+  --port <port>   Filter by port
+  -o <dir>        Output per-protocol files to directory
+  -l <level>      Output level: url (compact) | all (default)
+  -h, --help      Show this help
+  -v, --version   Print version
+
+PROTOCOLS:
+`)
+	for _, sc := range subcommands {
+		aliases := ""
+		if len(sc.Aliases) > 0 {
+			aliases = " (alias: " + strings.Join(sc.Aliases, ", ") + ")"
+		}
+		fmt.Printf("  %-10s %s%s\n", sc.Name, sc.Description, aliases)
+	}
+	fmt.Println()
+	fmt.Println("Run 'tcpshow <protocol> -h' for protocol-specific flags.")
+	fmt.Println()
+	fmt.Println("EXAMPLES:")
+	fmt.Println("  tcpshow                         # auto-detect all protocols")
+	fmt.Println("  tcpshow -i eth0 redis -k 'user:*'")
+	fmt.Println("  tcpshow mysql -q tableName -C 100+")
+	fmt.Println("  tcpshow -r capture.pcap dubbo -s 'com.example.*'")
+}
+
+func printAllHelp() {
+	printGlobalHelp()
+	fmt.Println("---")
+	fmt.Println()
+	for _, sc := range subcommands {
+		fmt.Printf("PROTOCOL: %s — %s\n", sc.Name, sc.Description)
+		fs := flag.NewFlagSet(sc.Name, flag.ExitOnError)
+		p := &ProtoConfig{}
+		sc.Setup(fs, p)
+		fs.SetOutput(os.Stdout)
+		fs.PrintDefaults()
+		if len(sc.Examples) > 0 {
+			fmt.Println("\nExamples:")
+			for _, ex := range sc.Examples {
+				fmt.Println(ex)
+			}
+		}
+		fmt.Println()
+	}
+}
+
+func printProtoHelp(sc *subcommand) {
+	fmt.Printf("tcpshow %s — %s\n\n", sc.Name, sc.Description)
+	fmt.Println("USAGE: tcpshow [global-flags] " + sc.Name + " [flags]")
+	fmt.Println()
+	fmt.Println("FLAGS:")
+	fs := flag.NewFlagSet(sc.Name, flag.ExitOnError)
+	p := &ProtoConfig{}
+	sc.Setup(fs, p)
+	fs.SetOutput(os.Stdout)
+	fs.PrintDefaults()
+	if len(sc.Examples) > 0 {
+		fmt.Println("\nEXAMPLES:")
+		for _, ex := range sc.Examples {
+			fmt.Println(ex)
+		}
+	}
+}
+
+// ---- Version ----
+
+func printVersion() {
+	fmt.Printf("tcpshow v%s\n", version)
+}
+
 // ---- Main ----
 
 func main() {
-	cfg := parseFlags()
+	args := os.Args[1:]
 
-	// Build protocol handlers registry
-	protocols := map[string]ProtocolHandler{
-		"dubbo": {
-			Name:     "dubbo",
-			Detector: dubboport.DetectDubbo,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
-				return &dubboHandler{baseHandler: baseHandler{Key: ck, Config: cfg, Printer: p}, seen: make(map[uint64]bool)}
-			},
-		},
-		"redis": {
-			Name:     "redis",
-			Detector: redisport.DetectRESP,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
-				return &redisHandler{baseHandler: baseHandler{Key: ck, Config: cfg, Printer: p}}
-			},
-		},
-		"rocketmq": {
-			Name:     "rocketmq",
-			Detector: rocketmqport.DetectRocketMQ,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
-				return &rocketmqHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
-			},
-		},
-		"mysql": {
-			Name:     "mysql",
-			Detector: mysqlport.DetectMySQL,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
-				return &mysqlHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
-			},
-		},
-		"mongo": {
-			Name:     "mongo",
-			Detector: mongoport.DetectMongo,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
-				return &mongoHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
-			},
-		},
-		"http": {
-			Name:     "http",
-			Detector: httpport.DetectHTTP,
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
-				return &httpHandler{baseHandler{Key: ck, Config: cfg, Printer: p}}
-			},
-		},
+	// Handle help/version before anything else
+	for _, a := range args {
+		if a == "-v" || a == "--version" {
+			printVersion()
+			return
+		}
 	}
 
-	// Select protocol
-	var proto *ProtocolHandler
-	if cfg.Protocol == "auto" || cfg.Protocol == "" {
-		// Use a multi-detector with fixed detection order
+	// Find subcommand position
+	subIdx := findSubcommand(args)
+
+	// Handle help
+	for _, a := range args {
+		if (a == "-h" || a == "--help") && subIdx == -1 {
+			printGlobalHelp()
+			return
+		}
+	}
+
+	// Check for --all flag
+	showAll := false
+	for _, a := range args {
+		if a == "--all" {
+			showAll = true
+			break
+		}
+	}
+	if showAll {
+		printAllHelp()
+		return
+	}
+
+	// Parse global flags
+	global := &GlobalConfig{Level: "all"}
+	globalFS := flag.NewFlagSet("tcpshow", flag.ExitOnError)
+	globalFS.StringVar(&global.Interface, "i", "any", "Network interface")
+	globalFS.StringVar(&global.IP, "ip", "", "Filter by IP")
+	var port uint
+	globalFS.UintVar(&port, "port", 0, "Filter by port")
+	globalFS.StringVar(&global.OutputDir, "o", "", "Output per-protocol files to directory")
+	globalFS.StringVar(&global.Level, "l", "all", "Output level: url|all")
+	globalFS.StringVar(&global.PcapFile, "r", "", "Read from pcap file")
+	globalFS.Bool("h", false, "Show help")
+
+	globalArgs := args
+	if subIdx < len(args) {
+		globalArgs = args[:subIdx]
+	}
+	globalFS.Parse(globalArgs)
+	global.Port = uint16(port)
+
+	// Determine protocol
+	proto := &ProtoConfig{}
+	var sc *subcommand
+
+	if subIdx < len(args) {
+		protoName := args[subIdx]
+		sc = subcommandByName(protoName)
+		if sc == nil {
+			fmt.Fprintf(os.Stderr, "Unknown protocol: %s\n", protoName)
+			fmt.Fprintf(os.Stderr, "Supported: ")
+			names := []string{}
+			for _, s := range subcommands {
+				names = append(names, s.Name)
+			}
+			fmt.Fprintln(os.Stderr, strings.Join(names, ", "))
+			os.Exit(1)
+		}
+		proto.Protocol = sc.Name
+
+		// Parse protocol flags
+		protoFS := flag.NewFlagSet(sc.Name, flag.ExitOnError)
+		sc.Setup(protoFS, proto)
+
+		protoArgs := args[subIdx+1:]
+		// Check for -h within proto args
+		for _, a := range protoArgs {
+			if a == "-h" || a == "--help" {
+				printProtoHelp(sc)
+				return
+			}
+		}
+		protoFS.Parse(protoArgs)
+	} else {
+		proto.Protocol = "auto"
+	}
+
+	// Build handler factory
+	printer := tcpport.NewMultiPrinter(global.OutputDir)
+
+	var makeHandler func(ck ConnectionKey) TrafficHandler
+
+	if proto.Protocol == "auto" {
+		// Auto-detect
 		detectOrder := []tcpport.ProtocolDetector{
 			dubboport.DetectDubbo,
 			dubboport.DetectTriple,
@@ -642,37 +932,66 @@ func main() {
 			redisport.DetectRESP,
 			httpport.DetectHTTP,
 		}
-		autoPH := &ProtocolHandler{
-			Name: "auto",
-			Detector: func(data []byte) bool {
-				for _, d := range detectOrder {
-					if d(data) {
-						return true
-					}
-				}
-				return false
-			},
-			Handler: func(ck ConnectionKey, cfg *Config, p *tcpport.MultiPrinter) TrafficHandler {
-				return &autoHandler{baseHandler: baseHandler{Key: ck, Config: cfg, Printer: p}}
-			},
+		_ = detectOrder
+		makeHandler = func(ck ConnectionKey) TrafficHandler {
+			return &autoHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
 		}
-		proto = autoPH
 	} else {
-		if ph, ok := protocols[cfg.Protocol]; ok {
-			proto = &ph
-		} else {
-			fmt.Fprintf(os.Stderr, "Unknown protocol: %s. Supported: %s\n", cfg.Protocol, protocolNames(protocols))
-			os.Exit(1)
+		switch proto.Protocol {
+		case "dubbo":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &dubboHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}, seen: make(map[uint64]bool)}
+			}
+		case "redis":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &redisHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
+			}
+		case "rocketmq":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &rocketmqHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
+			}
+		case "mysql":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &mysqlHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
+			}
+		case "mongo":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &mongoHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
+			}
+		case "http":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &httpHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
+			}
 		}
 	}
 
-	printer := tcpport.NewMultiPrinter(cfg.OutputDir)
-	adapter := &connHandlerAdapter{cfg: cfg, printer: printer, proto: proto}
-	assembler := tcpport.NewTCPAssembler(adapter, proto.Detector)
-	assembler.FilterIP = cfg.IP
-	assembler.FilterPort = cfg.Port
+	// Build detector for auto mode
+	var detector tcpport.ProtocolDetector
+	if proto.Protocol == "auto" {
+		detectOrder := []tcpport.ProtocolDetector{
+			dubboport.DetectDubbo, dubboport.DetectTriple,
+			rocketmqport.DetectRocketMQ, mongoport.DetectMongo,
+			mysqlport.DetectMySQL, redisport.DetectRESP,
+			httpport.DetectHTTP,
+		}
+		detector = func(data []byte) bool {
+			for _, d := range detectOrder {
+				if d(data) {
+					return true
+				}
+			}
+			return false
+		}
+	} else {
+		detector = func(data []byte) bool { return true }
+	}
 
-	packets := openPackets(cfg)
+	adapter := &connHandlerAdapter{global: global, proto: proto, printer: printer, makeH: makeHandler}
+	assembler := tcpport.NewTCPAssembler(adapter, detector)
+	assembler.FilterIP = global.IP
+	assembler.FilterPort = global.Port
+
+	packets := openPackets(global)
 	if packets == nil {
 		return
 	}
@@ -700,53 +1019,19 @@ outer:
 	printer.Finish()
 }
 
-func protocolNames(m map[string]ProtocolHandler) string {
-	names := []string{"auto"}
-	for k := range m {
-		names = append(names, k)
-	}
-	return strings.Join(names, ", ")
-}
+// ---- Packet capture ----
 
-func parseFlags() *Config {
-	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	cfg := &Config{}
-
-	fs.StringVar(&cfg.Level, "level", "header", "Output level: url | header | all")
-	fs.StringVar(&cfg.IP, "ip", "", "Filter by ip")
-	var port uint
-	fs.UintVar(&port, "port", 0, "Filter by port (default: any)")
-	fs.StringVar(&cfg.Device, "device", "any", "Capture from network device")
-	fs.StringVar(&cfg.File, "file", "", "Read from pcap file")
-	fs.StringVar(&cfg.Output, "output", "", "Write to single file instead of stdout")
-	fs.StringVar(&cfg.OutputDir, "output-dir", "", "Write per-protocol files to directory (e.g., redis.log, mysql.log)")
-	fs.StringVar(&cfg.Protocol, "protocol", "auto", "Protocol: auto, dubbo, redis, rocketmq, mysql, mongo")
-
-	fs.StringVar(&cfg.DubboService, "dubbo-service", "", "Dubbo: filter by service name (wildcard)")
-	fs.StringVar(&cfg.DubboMethod, "dubbo-method", "", "Dubbo: filter by method name (wildcard)")
-	fs.StringVar(&cfg.RedisCommand, "redis-command", "", "Redis: filter by command (SET, GET, etc.)")
-	fs.StringVar(&cfg.RedisKey, "redis-key", "", "Redis: filter by key (regex pattern)")
-	fs.IntVar(&cfg.RMQCode, "rmq-code", 0, "RocketMQ: filter by request code")
-	fs.StringVar(&cfg.MySQLCommand, "mysql-command", "", "MySQL: filter by command (Query, Ping, etc.)")
-	fs.StringVar(&cfg.MySQLQuery, "mysql-query", "", "MySQL: filter by query substring")
-	fs.IntVar(&cfg.MongoOpCode, "mongo-opcode", 0, "MongoDB: filter by opcode")
-
-	fs.Parse(os.Args[1:])
-	cfg.Port = uint16(port)
-	return cfg
-}
-
-func openPackets(cfg *Config) chan gopacket.Packet {
-	if cfg.File != "" {
-		handle, err := pcap.OpenOffline(cfg.File)
+func openPackets(global *GlobalConfig) chan gopacket.Packet {
+	if global.PcapFile != "" {
+		handle, err := pcap.OpenOffline(global.PcapFile)
 		if err != nil {
-			logger.Error("Open file", cfg.File, "error:", err)
+			logger.Error("Open file", global.PcapFile, "error:", err)
 			return nil
 		}
 		return gopacket.NewPacketSource(handle, handle.LinkType()).Packets()
 	}
 
-	if cfg.Device == "any" && runtime.GOOS != "linux" {
+	if global.Interface == "any" && runtime.GOOS != "linux" {
 		interfaces, err := pcap.FindAllDevs()
 		if err != nil {
 			logger.Error("find device error:", err)
@@ -754,7 +1039,7 @@ func openPackets(cfg *Config) chan gopacket.Packet {
 		}
 		var chs []chan gopacket.Packet
 		for _, itf := range interfaces {
-			ch := openDevice(itf.Name, cfg.IP, cfg.Port)
+			ch := openDevice(itf.Name, global.IP, global.Port)
 			if ch != nil {
 				chs = append(chs, ch)
 			}
@@ -762,7 +1047,7 @@ func openPackets(cfg *Config) chan gopacket.Packet {
 		return mergeChannels(chs)
 	}
 
-	return openDevice(cfg.Device, cfg.IP, cfg.Port)
+	return openDevice(global.Interface, global.IP, global.Port)
 }
 
 func openDevice(device, ip string, port uint16) chan gopacket.Packet {

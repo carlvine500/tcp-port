@@ -1,4 +1,4 @@
-module github.com/carlvine500/tcp-port
+module github.com/carlvine500/tcpshow
 
 go 1.26.5
 
