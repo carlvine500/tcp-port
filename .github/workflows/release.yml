@@ -58,10 +58,11 @@ jobs:
 
       - name: Install Npcap SDK (Windows)
         if: matrix.os == 'windows'
+        shell: pwsh
         run: |
-          curl -L -o npcap-sdk.zip https://npcap.com/dist/npcap-sdk-1.13.zip
-          7z x npcap-sdk.zip -oC:\npcap-sdk
-          echo "CGO_ENABLED=1" >> $env:GITHUB_ENV
+          $url = "https://npcap.com/dist/npcap-sdk-1.13.zip"
+          Invoke-WebRequest -Uri $url -OutFile npcap-sdk.zip
+          Expand-Archive -Path npcap-sdk.zip -DestinationPath C:\npcap-sdk
           echo "CGO_LDFLAGS=-LC:\\npcap-sdk\\Lib\\x64" >> $env:GITHUB_ENV
 
       - name: Build
