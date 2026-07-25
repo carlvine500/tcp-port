@@ -231,7 +231,7 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 		} else {
 			h.writeLine(dubboport.FormatDubbo(req))
 		}
-		if !req.Header.IsTwoway || req.Header.IsEvent {
+		if !req.Header.IsTwoway || req.IsRealHeartbeat {
 			h.send()
 			continue
 		}
