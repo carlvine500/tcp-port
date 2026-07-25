@@ -2,6 +2,7 @@ package nacosport
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -14,9 +15,10 @@ type NacosMessage struct {
 	Method     string            // HTTP method: GET, POST, PUT, DELETE
 	Path       string            // URL path: /nacos/v1/ns/instance
 	APIType    string            // heartbeat, service, discovery, config, service_list, auth
-	Params     map[string]string // query parameters
-	Body       string            // request body
+	Params     map[string]string // query parameters + form body params
+	Body       string            // raw request/response body (for display)
 	StatusCode int               // HTTP status code (responses only)
+	IsJSON     bool              // true if body is JSON
 	Summary    string            // human-readable summary
 	Direction  string            // "C->S" or "S->C"
 }
@@ -28,7 +30,6 @@ var httpMethods = map[string]bool{
 }
 
 // classifyNacosPath determines the API type from a Nacos path.
-// Order matters — check more specific patterns first.
 func classifyNacosPath(p string) string {
 	if strings.Contains(p, "/instance/beat") {
 		return "heartbeat"
@@ -48,11 +49,15 @@ func classifyNacosPath(p string) string {
 	if strings.Contains(p, "/auth/login") {
 		return "auth"
 	}
+	// Nacos 2.x gRPC gateways
+	if strings.Contains(p, "/nacos/v2/") {
+		return "nacos2"
+	}
 	return "nacos"
 }
 
 // DetectNacos checks if data looks like a Nacos HTTP API message.
-// A Nacos message is an HTTP request whose path contains "/nacos/v1/".
+// Also detects Nacos 2.x gRPC over HTTP/2.
 func DetectNacos(data []byte) bool {
 	if len(data) < 8 {
 		return false
@@ -60,18 +65,25 @@ func DetectNacos(data []byte) bool {
 
 	s := string(data)
 
+	// HTTP/2 connection preface: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	// Nacos gRPC uses HTTP/2 — detect via PRI preface
+	if strings.HasPrefix(s, "PRI * HTTP/2.0") {
+		// Could be Nacos gRPC — accept it for now
+		// We'll classify later in the handler
+		return true
+	}
+
 	// Must start with an HTTP method
 	for method := range httpMethods {
 		prefix := method + " "
 		if strings.HasPrefix(s, prefix) {
 			rest := s[len(prefix):]
-			// Extract the path (up to space or newline)
 			pathEnd := strings.IndexAny(rest, " \r\n")
 			path := rest
 			if pathEnd > 0 {
 				path = rest[:pathEnd]
 			}
-			if strings.Contains(path, "/nacos/v1/") {
+			if strings.Contains(path, "/nacos/") {
 				return true
 			}
 			return false
@@ -82,11 +94,16 @@ func DetectNacos(data []byte) bool {
 }
 
 // ReadNacosMessage reads a Nacos HTTP request or response from a reader.
-// It parses the HTTP framing and extracts Nacos-specific fields.
 func ReadNacosMessage(r io.Reader, direction string) (*NacosMessage, error) {
 	br, ok := r.(*bufio.Reader)
 	if !ok {
 		br = bufio.NewReader(r)
+	}
+
+	// Peek first bytes to detect HTTP/2 (gRPC) vs HTTP/1.1
+	peek, _ := br.Peek(24)
+	if len(peek) >= 14 && strings.HasPrefix(string(peek), "PRI * HTTP/2.0") {
+		return readNacosGRPC(br, direction)
 	}
 
 	// Read request/status line
@@ -115,7 +132,6 @@ func ReadNacosMessage(r io.Reader, direction string) (*NacosMessage, error) {
 		rawPath := ""
 		if len(parts) >= 2 {
 			rawPath = parts[1]
-			// Split path and query string
 			if idx := strings.Index(rawPath, "?"); idx >= 0 {
 				msg.Path = rawPath[:idx]
 				parseQueryParams(msg.Params, rawPath[idx+1:])
@@ -136,6 +152,7 @@ func ReadNacosMessage(r io.Reader, direction string) (*NacosMessage, error) {
 
 	// Read headers
 	var contentLength int
+	var contentType string
 	for {
 		hdrLine, err := br.ReadString('\n')
 		if err != nil {
@@ -153,6 +170,9 @@ func ReadNacosMessage(r io.Reader, direction string) (*NacosMessage, error) {
 			if key == "content-length" {
 				contentLength, _ = strconv.Atoi(val)
 			}
+			if key == "content-type" {
+				contentType = strings.ToLower(val)
+			}
 		}
 	}
 
@@ -162,6 +182,14 @@ func ReadNacosMessage(r io.Reader, direction string) (*NacosMessage, error) {
 		_, err := io.ReadFull(br, body)
 		if err == nil {
 			msg.Body = string(body)
+			// Parse body into params for form-urlencoded
+			if strings.Contains(contentType, "application/x-www-form-urlencoded") {
+				parseQueryParams(msg.Params, msg.Body)
+			}
+			// Detect JSON
+			if strings.Contains(contentType, "application/json") {
+				msg.IsJSON = true
+			}
 		}
 	}
 
@@ -171,7 +199,27 @@ func ReadNacosMessage(r io.Reader, direction string) (*NacosMessage, error) {
 	return msg, nil
 }
 
-// parseQueryParams parses URL query parameters into a map.
+// readNacosGRPC handles Nacos 2.x gRPC over HTTP/2.
+func readNacosGRPC(br *bufio.Reader, direction string) (*NacosMessage, error) {
+	// Read the HTTP/2 connection preface: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	preface := make([]byte, 24)
+	_, err := io.ReadFull(br, preface)
+	if err != nil {
+		return nil, err
+	}
+
+	msg := &NacosMessage{
+		Method:    "GRPC",
+		Path:      "/nacos/v2/grpc",
+		APIType:   "nacos2",
+		Params:    make(map[string]string),
+		Direction: direction,
+	}
+	msg.Summary = "[Nacos 2.x gRPC] connection established"
+	return msg, nil
+}
+
+// parseQueryParams parses URL-encoded or form-encoded key=value pairs.
 func parseQueryParams(params map[string]string, query string) {
 	for _, pair := range strings.Split(query, "&") {
 		if pair == "" {
@@ -188,10 +236,25 @@ func parseQueryParams(params map[string]string, query string) {
 
 // buildSummary builds a human-readable summary for the Nacos message.
 func buildSummary(msg *NacosMessage) string {
+	if msg.Method == "GRPC" {
+		return "[Nacos 2.x gRPC]"
+	}
 	if msg.Method != "" {
-		// Request summary
 		return fmt.Sprintf("[Nacos %s] %s %s", msg.APIType, msg.Method, msg.Path)
 	}
-	// Response summary
-	return fmt.Sprintf("[Nacos] HTTP %d", msg.StatusCode)
+	if msg.StatusCode > 0 {
+		statusText := "ok"
+		if msg.StatusCode >= 400 {
+			statusText = "error"
+		}
+		return fmt.Sprintf("[Nacos] HTTP %d (%s)", msg.StatusCode, statusText)
+	}
+	return "[Nacos]"
+}
+
+// ParseJSONBody tries to parse the JSON body into a map.
+func ParseJSONBody(body string) (map[string]interface{}, error) {
+	var m map[string]interface{}
+	err := json.Unmarshal([]byte(body), &m)
+	return m, err
 }

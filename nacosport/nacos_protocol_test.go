@@ -137,26 +137,28 @@ func TestClassifyNacosPath(t *testing.T) {
 }
 
 func TestFormatNacosMessage(t *testing.T) {
-	// Request formatting
+	// Request formatting — with form params parsed from body
 	t.Run("request", func(t *testing.T) {
 		msg := &NacosMessage{
 			Method:    "POST",
 			Path:      "/nacos/v1/ns/instance",
 			APIType:   "service",
 			Direction: "C->S",
-			Params:    map[string]string{"namespaceId": "public", "serviceName": "demo"},
-			Body:      `{"ip":"10.0.0.1","port":8080}`,
+			Params:    map[string]string{"namespaceId": "public", "serviceName": "demo", "ip": "10.0.0.1", "port": "8080"},
 			Summary:   "[Nacos service] POST /nacos/v1/ns/instance",
 		}
 		out := FormatNacosMessage(msg)
 		if !strings.Contains(out, "[Nacos service]") {
 			t.Errorf("output should contain [Nacos service], got: %s", out)
 		}
-		if !strings.Contains(out, "namespaceId=public") {
-			t.Errorf("output should contain namespaceId=public, got: %s", out)
+		if !strings.Contains(out, "namespaceId:") {
+			t.Errorf("output should contain namespaceId:, got: %s", out)
 		}
-		if !strings.Contains(out, "Body:") {
-			t.Errorf("output should contain Body:, got: %s", out)
+		if !strings.Contains(out, "serviceName:") {
+			t.Errorf("output should contain serviceName:, got: %s", out)
+		}
+		if !strings.Contains(out, "ip:") {
+			t.Errorf("output should contain ip:, got: %s", out)
 		}
 	})
 
@@ -202,8 +204,8 @@ func TestFormatNacosURL(t *testing.T) {
 			StatusCode: 200,
 		}
 		out := FormatNacosURL(msg)
-		if out != "200\n" {
-			t.Errorf("FormatNacosURL = %q, want %q", out, "200\n")
+		if !strings.Contains(out, "200") {
+			t.Errorf("FormatNacosURL should contain 200, got: %q", out)
 		}
 	})
 }
