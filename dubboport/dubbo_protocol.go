@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 	"unicode"
 )
 
@@ -127,7 +128,8 @@ type DubboMessage struct {
 	HasException   bool
 
 	// Metadata
-	IsRealHeartbeat bool // true only if body is very small (< 50 bytes)
+	IsRealHeartbeat bool   // true only if body is very small (< 50 bytes)
+	ShowBody        bool   // if true, display raw body bytes
 }
 
 // ParseDubboBody performs best-effort parsing of Dubbo body.
@@ -167,6 +169,14 @@ func (m *DubboMessage) ParseDubboBody() {
 	// Still empty after type-specific parsing? Try generic fallback.
 	if m.ServiceName == "" && m.MethodName == "" && len(m.Body) > 2 {
 		m.parseGenericBody()
+	}
+
+	// Clean up compactedjava encoding artifacts from service/method names
+	if m.ServiceName != "" {
+		m.ServiceName = cleanClassName(m.ServiceName)
+	}
+	if m.MethodName != "" {
+		m.MethodName = cleanMethodName(m.MethodName)
 	}
 
 	// Label events that we couldn't identify.
@@ -348,7 +358,54 @@ func (m *DubboMessage) parseRequestMetadata() {
 	}
 }
 
-// ---- Utility functions ----
+// cleanClassName strips garbage prefixes that compactedjava encoding
+// can introduce before the actual Java class name.
+// Examples:
+//   "SNAPSHOT04com.bizcloud.Foo" → "com.bizcloud.Foo"
+//   "C0Wcom.successchannel.Bar" → "com.successchannel.Bar"
+//   "1.20762000000.17849900595990004" → keep as-is (numeric path)
+func cleanClassName(s string) string {
+	if s == "" {
+		return s
+	}
+	// Find first occurrence of a known Java package prefix
+	for _, prefix := range []string{"com.", "org.", "cn.", "net.", "io.", "java.", "javax."} {
+		if idx := strings.Index(s, prefix); idx >= 0 {
+			return s[idx:]
+		}
+	}
+	// If no recognized package prefix, try to strip leading non-alpha garbage
+	// e.g., "C0W" + real_name, "SNAPSHOT04" + real_name
+	for i, r := range s {
+		if unicode.IsLetter(r) && i > 0 {
+			// Check if from here forward looks like a class name
+			rest := s[i:]
+			if containsDot(rest) && len(rest) >= 10 {
+				return rest
+			}
+		}
+	}
+	return s
+}
+
+// cleanMethodName strips trailing digits/type-markers from method names.
+// Examples: "containsAdminFunction0" → "containsAdminFunction"
+//
+//	"getButton0" → "getButton"
+func cleanMethodName(s string) string {
+	if s == "" {
+		return s
+	}
+	// Strip trailing digits that aren't part of camelCase
+	for len(s) > 1 && s[len(s)-1] >= '0' && s[len(s)-1] <= '9' {
+		if s[len(s)-2] >= 'a' && s[len(s)-2] <= 'z' {
+			s = s[:len(s)-1]
+		} else {
+			break
+		}
+	}
+	return s
+}
 
 // extractReadableStrings scans a byte slice and extracts all sequences
 // of printable ASCII characters (letters, digits, dots, underscores, slashes)

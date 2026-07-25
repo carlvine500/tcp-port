@@ -55,6 +55,7 @@ type ProtoConfig struct {
 
 	DubboService string
 	DubboMethod  string
+	DubboShowBody bool
 	RedisKey     string
 	RedisCommand string
 	RMQCode      int
@@ -229,6 +230,7 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 		if h.Global.Level == "url" {
 			h.writeLine(dubboport.FormatDubboURL(req))
 		} else {
+			req.ShowBody = h.Proto.DubboShowBody
 			h.writeLine(dubboport.FormatDubbo(req))
 		}
 		if !req.Header.IsTwoway || req.IsRealHeartbeat {
@@ -237,18 +239,17 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 		}
 		resp, err := dubboport.ReadDubboMessage(respR)
 		if err != nil {
-			// Response not (yet) available — send the request alone
-			// and continue. Don't break the loop on read failure.
 			logger.Debug("dubbo response read error:", err)
 			h.send()
 			continue
 		}
 		if !h.checkCost() {
-			h.send() // flush empty to reset buf
+			h.send()
 			continue
 		}
 		if h.Global.Level != "url" {
 			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+			resp.ShowBody = h.Proto.DubboShowBody
 			h.writeLine(dubboport.FormatDubbo(resp))
 		}
 		h.send()
@@ -771,6 +772,8 @@ var subcommands = []subcommand{
 			fs.StringVar(&p.DubboService, "service", "", "Filter by service name (wildcard)")
 			fs.StringVar(&p.DubboMethod, "m", "", "Filter by method name (wildcard)")
 			fs.StringVar(&p.DubboMethod, "method", "", "Filter by method name (wildcard)")
+			fs.BoolVar(&p.DubboShowBody, "b", false, "Show raw request/response body (hex dump)")
+			fs.BoolVar(&p.DubboShowBody, "body", false, "Show raw request/response body (hex dump)")
 			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
 			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
 		},

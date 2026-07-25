@@ -34,6 +34,11 @@ func FormatDubbo(msg *DubboMessage) string {
 	}
 	sb.WriteString(fmt.Sprintf("  Data Length: %d bytes\n", msg.Header.DataLength))
 
+	// Show raw body if requested
+	if msg.ShowBody && len(msg.Body) > 0 {
+		sb.WriteString(fmt.Sprintf("  Body:\n%s\n", hex.Dump(msg.Body)))
+	}
+
 	return sb.String()
 }
 
