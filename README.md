@@ -190,6 +190,96 @@ sudo setcap cap_net_raw+ep tcpshow
 ./tcpshow redis
 ```
 
+## 与 tshark 对比
+
+tshark (Wireshark 的命令行版) 是强大的万能网络分析器，但 tcpshow 在以下场景做它做不到的事：
+
+### tshark 能做 ✅（tcpshow 也支持）
+
+```bash
+tshark -i eth0 -Y redis          # 过滤 Redis
+tshark -i eth0 -Y mysql.query    # 过滤 MySQL 查询
+tshark -r file.pcap -Y http      # 读 pcap 文件
+```
+
+### tshark 做不到 ❌（tcpshow 核心差异）
+
+**1. Dubbo / Triple / RocketMQ 协议解析**
+
+这三种是 Java 生态特有的二进制协议，tshark 没有内置解析器。tcpshow 自实现了完整协议栈：
+- Dubbo 2.x（Hessian2/compactjava 序列化）
+- Triple（Dubbo 3.x，基于 HTTP/2 + Protobuf）
+- RocketMQ Remoting（自定义二进制协议）
+
+```bash
+tcpshow dubbo -s com.example.* -m getUser
+tcpshow rocketmq --code 10
+```
+
+**2. 请求-响应配对 + 耗时计算**
+
+tshark 把每个包独立展示，不关联请求和响应。tcpshow 将 TCP 流中的请求-响应配对，计算精确耗时：
+
+```
+# tshark — 两个独立包，不关联
+Frame 1: 192.168.1.1:12345 → 192.168.1.2:3306  [Query: SELECT...]
+Frame 2: 192.168.1.2:3306 → 192.168.1.1:12345  [Response...]
+
+# tcpshow — 成对展示，带耗时
+2026-07-25 07:09:35.328 [192.168.1.1:12345 -----> 192.168.1.2:3306]
+  Query: SELECT * FROM orders WHERE status='pending'
+2026-07-25 07:09:35.987 [192.168.1.2:3306 <----- 192.168.1.1:12345] (659ms)
+  OK, 42 rows affected
+```
+
+**3. 基于耗时的过滤**
+
+`-C 100+` 只看慢于 100ms 的请求——tshark 没有"先算耗时再过滤"的能力，因为 tshark 不配对请求响应。
+
+```bash
+tcpshow mysql -q tableName -C 100+    # 只看慢查询
+tcpshow redis -C 50-200               # 50~200ms
+tcpshow dubbo -C -50                  # ≤50ms 的快请求
+```
+
+**4. BSON 正文解析为 JSON**
+
+tshark 解析 MongoDB 协议时只显示 opcode，不解析 BSON 内容：
+
+```bash
+# tshark
+OP_MSG find (body=676 bytes)
+
+# tcpshow
+OP_MSG find (body=676 bytes)
+  BSON: {"find":"orders","filter":{"status":"pending"},"limit":50,"$db":"mydb"}
+```
+
+**5. 简洁的专项过滤语法**
+
+```bash
+# tshark — 需要记复杂的 display filter
+tshark -Y 'mysql.query contains "tableName"' 
+
+# tcpshow
+tcpshow mysql -q tableName
+```
+
+### 能力矩阵
+
+| 能力 | tshark | tcpshow |
+|------|:------:|:-------:|
+| 抓包 / 读 pcap | ✅ | ✅ |
+| TCP 流重组 | ✅ | ✅ |
+| HTTP / Redis / MySQL / MongoDB 解析 | ✅ | ✅ |
+| Dubbo / Triple / RocketMQ 解析 | ❌ | ✅ |
+| 请求-响应配对 + 耗时 | ❌ | ✅ |
+| 耗时过滤 (`-C 100+`) | ❌ | ✅ |
+| BSON → JSON 展示 | ❌ | ✅ |
+| 子命令简写 + 协议专属帮助 | — | ✅ |
+
+> **选型建议：** 如果你只抓 HTTP/MySQL 包并用 Wireshark 图形界面分析细节，tshark + Wireshark 是更全面的选择。如果你需要在服务器终端快速排查 Dubbo 调用链、定位慢 Redis/MySQL/MongoDB 查询、或监控 RocketMQ 消息流量，tcpshow 更直接。
+
 ## License
 
 MIT
