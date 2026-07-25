@@ -48,7 +48,11 @@ func FormatDubbo(msg *DubboMessage) string {
 			if len(msg.Params) > 0 {
 				sb.WriteString("  Params:\n")
 				for _, p := range msg.Params {
-					sb.WriteString(fmt.Sprintf("    %-22s %s\n", p.Key+":", p.Value))
+					if p.Value != "" {
+						sb.WriteString(fmt.Sprintf("    %-22s %s\n", p.Key+":", p.Value))
+					} else {
+						sb.WriteString(fmt.Sprintf("    %s\n", p.Key))
+					}
 				}
 			}
 			if len(msg.Attachments) > 0 {

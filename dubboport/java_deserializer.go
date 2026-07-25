@@ -12,21 +12,21 @@ const (
 	_streamMagic   uint16 = 0xACED
 	_streamVersion uint16 = 0x0005
 
-	_tcNull          byte = 0x70
-	_tcReference     byte = 0x71
-	_tcClassDesc     byte = 0x72
-	_tcObject        byte = 0x73
-	_tcString        byte = 0x74
-	_tcArray         byte = 0x75
-	_tcClass         byte = 0x76
-	_tcBlockData     byte = 0x77
-	_tcEndBlockData  byte = 0x78
-	_tcReset         byte = 0x79
-	_tcBlockDataLong byte = 0x7A
-	_tcException     byte = 0x7B
-	_tcLongString    byte = 0x7C
+	_tcNull           byte = 0x70
+	_tcReference      byte = 0x71
+	_tcClassDesc      byte = 0x72
+	_tcObject         byte = 0x73
+	_tcString         byte = 0x74
+	_tcArray          byte = 0x75
+	_tcClass          byte = 0x76
+	_tcBlockData      byte = 0x77
+	_tcEndBlockData   byte = 0x78
+	_tcReset          byte = 0x79
+	_tcBlockDataLong  byte = 0x7A
+	_tcException      byte = 0x7B
+	_tcLongString     byte = 0x7C
 	_tcProxyClassDesc byte = 0x7D
-	_tcEnum          byte = 0x7E
+	_tcEnum           byte = 0x7E
 
 	// Class descriptor flags
 	_scSerializable   byte = 0x02
@@ -307,9 +307,28 @@ func (d *javaDeserializer) readClassDesc() (*classDescInfo, error) {
 
 // readClassData reads field values for each class in the hierarchy and
 // populates result. Walks the linked list from most-derived to base.
+//
+// For classes with SC_WRITE_METHOD (e.g. java.util.HashMap), the field
+// data is encoded as TC_BLOCKDATA/TC_BLOCKDATALONG chunks terminated by
+// TC_ENDBLOCKDATA. In that case we skip the inlined field reading and
+// skip the block-data annotation instead.
 func (d *javaDeserializer) readClassData(desc *classDescInfo, result map[string]interface{}) error {
 	if desc == nil {
 		return nil
+	}
+
+	hasWriteMethod := (desc.flags & _scWriteMethod) != 0
+
+	// If this class has writeObject and the next byte looks like block data,
+	// skip the inlined field reading — the actual data is in the annotation.
+	if hasWriteMethod && d.pos < len(d.data) {
+		tc := d.data[d.pos]
+		if tc == _tcBlockData || tc == _tcBlockDataLong {
+			if err := d.skipObjectAnnotation(); err != nil {
+				return err
+			}
+			return d.readClassData(desc.super, result)
+		}
 	}
 
 	// Read values for this class's fields (in declaration order)
@@ -325,7 +344,7 @@ func (d *javaDeserializer) readClassData(desc *classDescInfo, result map[string]
 	}
 
 	// Object annotation if SC_WRITE_METHOD
-	if (desc.flags & _scWriteMethod) != 0 {
+	if hasWriteMethod {
 		if err := d.skipObjectAnnotation(); err != nil {
 			return err
 		}
@@ -765,6 +784,181 @@ func ParseJavaSerializedArgs(body []byte, startPos int) (map[string]interface{},
 		return nil, fmt.Errorf("invalid start position %d for body of length %d", startPos, len(body))
 	}
 	return deserializeJavaArgs(body[startPos:])
+}
+
+// skipClassDescWithData reads and skips a TC_OBJECT's class descriptor
+// chain and its associated classdata, positioning the deserializer just
+// past the last classdata block. Used to skip past a HashMap object so
+// its entries can be read as inline content elements.
+func (d *javaDeserializer) skipClassDescWithData() error {
+	desc, err := d.readClassDesc()
+	if err != nil {
+		return fmt.Errorf("classdesc: %w", err)
+	}
+	return d.skipClassData(desc)
+}
+
+// skipClassData skips classdata for a class hierarchy without populating
+// a result map. For SC_WRITE_METHOD classes (e.g. HashMap), the data
+// is in block-data annotation form and is skipped via skipObjectAnnotation.
+func (d *javaDeserializer) skipClassData(desc *classDescInfo) error {
+	if desc == nil {
+		return nil
+	}
+
+	hasWriteMethod := (desc.flags & _scWriteMethod) != 0
+
+	if hasWriteMethod && d.pos < len(d.data) {
+		tc := d.data[d.pos]
+		if tc == _tcBlockData || tc == _tcBlockDataLong {
+			if err := d.skipObjectAnnotation(); err != nil {
+				return err
+			}
+			return d.skipClassData(desc.super)
+		}
+	}
+
+	// Skip primitive field values individually
+	for _, f := range desc.fields {
+		if isPrimitiveTypeCode(f.typeCode) {
+			if _, err := d.readFieldValue(f.typeCode); err != nil {
+				return err
+			}
+		} else {
+			if _, err := d.readContent(); err != nil {
+				return err
+			}
+		}
+	}
+
+	if hasWriteMethod {
+		if err := d.skipObjectAnnotation(); err != nil {
+			return err
+		}
+	}
+
+	return d.skipClassData(desc.super)
+}
+
+// findClassDesc scans data[startPos:] for a TC_CLASSDESC whose class name
+// equals className. Returns the byte offset of TC_CLASSDESC, or -1 if not found.
+func findClassDesc(data []byte, startPos int, className string) int {
+	nameLen := len(className)
+	for pos := startPos; pos+3+nameLen <= len(data); pos++ {
+		if data[pos] != _tcClassDesc {
+			continue
+		}
+		utfLen := int(binary.BigEndian.Uint16(data[pos+1 : pos+3]))
+		if utfLen != nameLen {
+			continue
+		}
+		if pos+3+nameLen > len(data) {
+			continue
+		}
+		if string(data[pos+3:pos+3+nameLen]) == className {
+			return pos
+		}
+	}
+	return -1
+}
+
+// ParseJavaSerializedAttachments parses a java.util.HashMap from a
+// compactedjava Dubbo body and returns its string key-value entries.
+//
+// body is the full Dubbo body; startPos marks where to begin scanning
+// for the HashMap (typically m.ArgStartPos). Returns a map of attachment
+// key to value, or nil with error if no HashMap entries could be parsed.
+func ParseJavaSerializedAttachments(body []byte, startPos int) (map[string]string, error) {
+	pos := findClassDesc(body, startPos, "java.util.HashMap")
+	if pos < 0 {
+		return nil, fmt.Errorf("java.util.HashMap classdesc not found")
+	}
+	// Expect TC_OBJECT exactly before the classdesc
+	if pos < 1 || body[pos-1] != _tcObject {
+		return nil, fmt.Errorf("expected TC_OBJECT before HashMap classdesc at %d", pos)
+	}
+
+	d := &javaDeserializer{data: body, pos: pos - 1}
+
+	// Consume TC_OBJECT tag
+	d.pos++
+
+	// Skip the classdesc chain and classdata to reach the entries
+	if err := d.skipClassDescWithData(); err != nil {
+		return nil, fmt.Errorf("skipping HashMap: %w", err)
+	}
+
+	// Read entries as key-value string pairs
+	result := make(map[string]string)
+	for d.pos < len(d.data) {
+		// Read key — expect a string
+		key, err := d.readObjectString()
+		if err != nil {
+			break
+		}
+		if d.pos >= len(d.data) {
+			break
+		}
+		// Read value — may be string, number, boolean, null, etc.
+		val, err := d.readEntryValue()
+		if err != nil {
+			result[key] = "<parse-error>"
+			break
+		}
+		result[key] = val
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no HashMap entries parsed")
+	}
+	return result, nil
+}
+
+// readEntryValue reads an attachment value, converting common Java
+// serialization types to a string representation.
+func (d *javaDeserializer) readEntryValue() (string, error) {
+	if d.pos >= len(d.data) {
+		return "", fmt.Errorf("eof reading entry value")
+	}
+	tc := d.data[d.pos]
+	switch tc {
+	case _tcString:
+		return d.readString()
+	case _tcLongString:
+		return d.readLongString()
+	case _tcReference:
+		ref, err := d.readReference()
+		if err != nil {
+			return "", err
+		}
+		if s, ok := ref.(string); ok {
+			return s, nil
+		}
+		return fmt.Sprintf("%v", ref), nil
+	case _tcNull:
+		d.pos++
+		return "", nil
+	case _tcObject:
+		// Boxed primitives (Integer, Long, Boolean, etc.) or nested objects.
+		obj, err := d.readObject()
+		if err != nil {
+			return "", err
+		}
+		// Try the "value" field first (boxed primitives)
+		if m, ok := obj.(map[string]interface{}); ok {
+			if v, ok2 := m["value"]; ok2 {
+				return fmt.Sprintf("%v", v), nil
+			}
+		}
+		return fmt.Sprintf("%v", obj), nil
+	default:
+		// Unknown type — skip one content element to avoid getting stuck
+		_, err := d.readContent()
+		if err != nil {
+			return "", err
+		}
+		return "<non-string>", nil
+	}
 }
 
 // skipBlockDataLong skips a TC_BLOCKDATALONG chunk.

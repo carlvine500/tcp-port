@@ -10,13 +10,13 @@ import (
 
 // Dubbo protocol constants.
 const (
-	DubboMagicNumber   uint16 = 0xdabb
-	DubboHeaderSize           = 16
+	DubboMagicNumber uint16 = 0xdabb
+	DubboHeaderSize         = 16
 
 	// Flag bits — Alibaba Dubbo layout (legacy 2.5.x)
 	FlagSerializationMask byte = 0x1f // bits 0-4
-	FlagTwoway           byte = 0x20 // bit 5: request is twoway (expects response)
-	FlagEvent            byte = 0x40 // bit 6: is heartbeat event
+	FlagTwoway            byte = 0x20 // bit 5: request is twoway (expects response)
+	FlagEvent             byte = 0x40 // bit 6: is heartbeat event
 
 	// Flag bits — Apache Dubbo layout (2.7.x / 3.x)
 	// In Apache Dubbo, Twoway and Event bits are SWAPPED:
@@ -28,17 +28,17 @@ const (
 
 // DubboHeader represents the 16-byte Dubbo protocol header.
 type DubboHeader struct {
-	Magic           uint16 // magic number 0xdabb
-	Flag            byte   // serialization + twoway + event flags
-	Status          byte   // response status, 0 for request
-	RequestID       uint64 // request ID
-	DataLength      uint32 // body length
+	Magic      uint16 // magic number 0xdabb
+	Flag       byte   // serialization + twoway + event flags
+	Status     byte   // response status, 0 for request
+	RequestID  uint64 // request ID
+	DataLength uint32 // body length
 
 	// Parsed from Flag
 	SerializationID SerializationType
-	IsTwoway       bool
-	IsEvent        bool
-	IsRequest      bool // true=request, false=response (derived from status==0)
+	IsTwoway        bool
+	IsEvent         bool
+	IsRequest       bool // true=request, false=response (derived from status==0)
 }
 
 // ParseDubboHeader parses a 16-byte Dubbo protocol header.
@@ -193,6 +193,19 @@ func (m *DubboMessage) ParseDubboBody() {
 		m.MethodName = cleanMethodName(m.MethodName)
 	}
 
+	// For compactedjava: if ServiceName is still empty or was polluted by
+	// garbage number strings, run parseCompactedJavaBody as a fallback.
+	// It scans the raw body for real class names like "com.bizcloud...".
+	if m.Header.SerializationID == SerializationCompactedJava &&
+		(m.ServiceName == "" || isNumericDotOnly(m.ServiceName)) {
+		savedName := m.ServiceName
+		m.ServiceName = "" // reset so parseCompactedJavaBody can fill it
+		m.parseCompactedJavaBody()
+		if m.ServiceName == "" && savedName != "" {
+			m.ServiceName = savedName // keep original if fallback failed
+		}
+	}
+
 	// For compactedjava: try to deserialize Java args from the body
 	// after the compactedjava header strings.
 	if m.Header.SerializationID == SerializationCompactedJava &&
@@ -259,7 +272,14 @@ func (m *DubboMessage) parseCompactedJavaDirect() {
 		// strings[2] = service version (e.g. "1.0.0")
 		// strings[3] = method name (e.g. "sayHello")
 		// strings[4] = param types (e.g. "Ljava/lang/String;")
-		if containsDot(strings[1]) || strings[1] == strings[0] {
+		if isNumericDotOnly(strings[1]) {
+			// strings[1] is garbage; try shifted layout
+			if len(strings) >= 5 && containsDot(strings[2]) {
+				m.ServiceName = strings[2]
+				m.ServiceVersion = strings[3]
+				m.MethodName = strings[4]
+			}
+		} else if containsDot(strings[1]) || strings[1] == strings[0] {
 			// strings[1] looks like a service name OR same as dubbo version
 			// (in some Dubbo versions the fields might be shifted)
 			if containsDot(strings[1]) {
@@ -279,7 +299,7 @@ func (m *DubboMessage) parseCompactedJavaDirect() {
 		} else {
 			// Try alternate: find the first dotted string as service
 			for i, s := range strings {
-				if containsDot(s) && m.ServiceName == "" {
+				if containsDot(s) && m.ServiceName == "" && !isNumericDotOnly(s) {
 					m.ServiceName = s
 					if i+1 < len(strings) && !containsDot(strings[i+1]) {
 						m.ServiceVersion = strings[i+1]
@@ -393,12 +413,17 @@ func (m *DubboMessage) parseRequestMetadata() {
 // cleanClassName strips garbage prefixes that compactedjava encoding
 // can introduce before the actual Java class name.
 // Examples:
-//   "SNAPSHOT04com.bizcloud.Foo" → "com.bizcloud.Foo"
-//   "C0Wcom.successchannel.Bar" → "com.successchannel.Bar"
-//   "1.20762000000.17849900595990004" → keep as-is (numeric path)
+//
+//	"SNAPSHOT04com.bizcloud.Foo" → "com.bizcloud.Foo"
+//	"C0Wcom.successchannel.Bar" → "com.successchannel.Bar"
+//	"1.20762000000.17849900595990004" → "" (pure number-dot garbage)
 func cleanClassName(s string) string {
 	if s == "" {
 		return s
+	}
+	// Pure number-dot strings are garbage (e.g. "1.20762000000.17850216178280004")
+	if isNumericDotOnly(s) {
+		return ""
 	}
 	// Find first occurrence of a known Java package prefix
 	for _, prefix := range []string{"com.", "org.", "cn.", "net.", "io.", "java.", "javax."} {
@@ -418,6 +443,19 @@ func cleanClassName(s string) string {
 		}
 	}
 	return s
+}
+
+// isNumericDotOnly returns true if s consists only of digits and dots.
+func isNumericDotOnly(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, r := range s {
+		if r != '.' && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // cleanMethodName strips trailing digits/type-markers from method names.
@@ -444,9 +482,23 @@ func cleanMethodName(s string) string {
 // Parameters appear as readable field names in the body after the
 // initial header fields (version, service, method, param types).
 // Attachments appear near the end as key-value pairs.
+//
+// When ParsedArgs is available (Java deserialization succeeded for the
+// arguments), we skip the string-scanning heuristic for attachments and
+// use ParseJavaSerializedAttachments to properly decode the HashMap
+// that compactedjava uses for attachment storage. This avoids the
+// garbled KV pairs caused by binary data interleaving.
 func (m *DubboMessage) parseBodyParams() {
 	if len(m.Body) < 4 {
 		return
+	}
+
+	// For compactedjava with successfully-deserialized args, use the
+	// Java deserializer for attachments too — the string-scanning
+	// heuristic produces garbled KV pairs on binary-interleaved data.
+	if m.ParsedArgs != nil && m.Header.SerializationID == SerializationCompactedJava {
+		m.parseAttachmentsFromJava()
+		// Still extract parameter names via string scanning below
 	}
 
 	// Extract all readable strings from the body
@@ -479,6 +531,11 @@ func (m *DubboMessage) parseBodyParams() {
 		}
 	}
 
+	// Skip string-scanning attachments if we already parsed them via Java
+	if m.ParsedArgs != nil && m.Header.SerializationID == SerializationCompactedJava {
+		return
+	}
+
 	// Extract attachment key-value pairs (pairs of strings)
 	for i := attachStart; i+1 < len(allStrings); i += 2 {
 		key := allStrings[i]
@@ -498,6 +555,21 @@ func (m *DubboMessage) parseBodyParams() {
 	}
 }
 
+// parseAttachmentsFromJava attempts to parse attachment key-value pairs
+// from a compactedjava HashMap using the Java serialization deserializer.
+func (m *DubboMessage) parseAttachmentsFromJava() {
+	if m.ArgStartPos <= 0 || m.ArgStartPos >= len(m.Body) {
+		return
+	}
+	attachMap, err := ParseJavaSerializedAttachments(m.Body, m.ArgStartPos)
+	if err != nil || len(attachMap) == 0 {
+		return
+	}
+	for k, v := range attachMap {
+		m.Attachments = append(m.Attachments, KVPair{Key: k, Value: v})
+	}
+}
+
 // isJavaFieldName returns true if s looks like a Java field name (camelCase).
 func isJavaFieldName(s string) bool {
 	if len(s) < 2 || strings.Contains(s, ".") {
@@ -514,6 +586,7 @@ func isJavaFieldName(s string) bool {
 	}
 	return true
 }
+
 // extractReadableStrings scans a byte slice and extracts all sequences
 // of printable ASCII characters (letters, digits, dots, underscores, slashes)
 // that are at least minLen characters long. Sorted by position.
