@@ -58,6 +58,9 @@ tcpshow -r capture.pcap
 | `mongo` | — | MongoDB |
 | `rocketmq` | `rmq` | RocketMQ Remoting |
 | `http` | — | HTTP/1.x |
+| `websocket` | `ws` | WebSocket |
+| `zookeeper` | `zk` | ZooKeeper |
+| `nacos` | — | Nacos HTTP API |
 | *(无)* | — | 自动检测所有协议 |
 
 ## 全局参数
@@ -112,6 +115,24 @@ tcpshow -r capture.pcap
 | `--cost <filter>` | `-C` | 耗时过滤 |
 
 ### HTTP
+
+| 参数 | 短写 | 说明 |
+|------|------|------|
+| `--cost <filter>` | `-C` | 耗时过滤 |
+
+### WebSocket
+
+| 参数 | 短写 | 说明 |
+|------|------|------|
+| `--cost <filter>` | `-C` | 耗时过滤 |
+
+### ZooKeeper
+
+| 参数 | 短写 | 说明 |
+|------|------|------|
+| `--cost <filter>` | `-C` | 耗时过滤 |
+
+### Nacos
 
 | 参数 | 短写 | 说明 |
 |------|------|------|
@@ -272,6 +293,8 @@ tcpshow mysql -q tableName
 | 抓包 / 读 pcap | ✅ | ✅ |
 | TCP 流重组 | ✅ | ✅ |
 | HTTP / Redis / MySQL / MongoDB 解析 | ✅ | ✅ |
+| WebSocket / ZooKeeper 解析 | ✅ | ✅ |
+| Nacos 协议解析 | ❌ | ✅ |
 | Dubbo / Triple / RocketMQ 解析 | ❌ | ✅ |
 | 请求-响应配对 + 耗时 | ❌ | ✅ |
 | 耗时过滤 (`-C 100+`) | ❌ | ✅ |

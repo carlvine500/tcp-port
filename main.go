@@ -23,9 +23,12 @@ import (
 	"github.com/carlvine500/tcpshow/httpport"
 	"github.com/carlvine500/tcpshow/mongoport"
 	"github.com/carlvine500/tcpshow/mysqlport"
+	"github.com/carlvine500/tcpshow/nacosport"
 	"github.com/carlvine500/tcpshow/redisport"
 	"github.com/carlvine500/tcpshow/rocketmqport"
 	"github.com/carlvine500/tcpshow/tcpport"
+	"github.com/carlvine500/tcpshow/websocketport"
+	"github.com/carlvine500/tcpshow/zookeeperport"
 )
 
 var logger = vlog.CurrentPackageLogger()
@@ -545,6 +548,133 @@ func (h *httpHandler) Handle(conn *tcpport.TCPConnection) {
 	}
 }
 
+// ---- WebSocket Handler ----
+
+type websocketHandler struct{ baseHandler }
+
+func (h *websocketHandler) Handle(conn *tcpport.TCPConnection) {
+	defer conn.UpStream.Close()
+	defer conn.DownStream.Close()
+	h.protocol = "websocket"
+	reqR := bufio.NewReader(conn.UpStream)
+	defer tcpport.DiscardAll(reqR)
+	respR := bufio.NewReader(conn.DownStream)
+	defer tcpport.DiscardAll(respR)
+
+	for {
+		h.initBuf()
+		h.startReq()
+		msg, err := websocketport.ReadWebSocketMessage(reqR, "C->S")
+		if err != nil {
+			break
+		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
+		if h.Global.Level == "url" {
+			h.writeLine(websocketport.FormatWebSocketURL(msg))
+		} else {
+			h.writeLine(websocketport.FormatWebSocketMessage(msg))
+		}
+		h.send()
+	}
+	if h.hasContent() {
+		h.send()
+	}
+}
+
+// ---- ZooKeeper Handler ----
+
+type zookeeperHandler struct{ baseHandler }
+
+func (h *zookeeperHandler) Handle(conn *tcpport.TCPConnection) {
+	defer conn.UpStream.Close()
+	defer conn.DownStream.Close()
+	h.protocol = "zookeeper"
+	reqR := bufio.NewReader(conn.UpStream)
+	defer tcpport.DiscardAll(reqR)
+	respR := bufio.NewReader(conn.DownStream)
+	defer tcpport.DiscardAll(respR)
+
+	for {
+		h.initBuf()
+		h.startReq()
+		msg, err := zookeeperport.ReadZKMessage(reqR, "C->S")
+		if err != nil {
+			break
+		}
+		req, ok := msg.(*zookeeperport.ZKRequest)
+		if !ok {
+			continue
+		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
+		if h.Global.Level == "url" {
+			h.writeLine(zookeeperport.FormatZKURL(req))
+		} else {
+			h.writeLine(zookeeperport.FormatZKRequest(req))
+		}
+		resp, err := zookeeperport.ReadZKMessage(respR, "S->C")
+		if err != nil {
+			h.send()
+			break
+		}
+		if !h.checkCost() {
+			continue
+		}
+		h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+		if respMsg, ok := resp.(*zookeeperport.ZKResponse); ok {
+			h.writeLine(zookeeperport.FormatZKResponse(respMsg))
+		}
+		h.send()
+	}
+	if h.hasContent() {
+		h.send()
+	}
+}
+
+// ---- Nacos Handler ----
+
+type nacosHandler struct{ baseHandler }
+
+func (h *nacosHandler) Handle(conn *tcpport.TCPConnection) {
+	defer conn.UpStream.Close()
+	defer conn.DownStream.Close()
+	h.protocol = "nacos"
+	reqR := bufio.NewReader(conn.UpStream)
+	defer tcpport.DiscardAll(reqR)
+	respR := bufio.NewReader(conn.DownStream)
+	defer tcpport.DiscardAll(respR)
+
+	for {
+		h.initBuf()
+		h.startReq()
+		msg, err := nacosport.ReadNacosMessage(reqR, "C->S")
+		if err != nil {
+			break
+		}
+		h.writeReqLine(h.Key.SrcString(), h.Key.DstString())
+		if h.Global.Level == "url" {
+			h.writeLine(nacosport.FormatNacosURL(msg))
+		} else {
+			h.writeLine(nacosport.FormatNacosMessage(msg))
+		}
+		resp, err := nacosport.ReadNacosMessage(respR, "S->C")
+		if err != nil {
+			h.send()
+			break
+		}
+		if !h.checkCost() {
+			continue
+		}
+		if h.Global.Level != "url" {
+			h.writeRespLine(h.Key.DstString(), h.Key.SrcString())
+			h.writeLine(nacosport.FormatNacosMessage(resp))
+		}
+		h.send()
+	}
+	if h.hasContent() {
+		h.send()
+	}
+}
+
 // ---- Auto-detect handler ----
 
 type autoHandler struct {
@@ -581,6 +711,9 @@ func (h *autoHandler) run() {
 		{"mongo", mongoport.DetectMongo, func() TrafficHandler { return &mongoHandler{baseHandler: h.baseHandler} }},
 		{"mysql", mysqlport.DetectMySQL, func() TrafficHandler { return &mysqlHandler{baseHandler: h.baseHandler} }},
 		{"redis", redisport.DetectRESP, func() TrafficHandler { return &redisHandler{baseHandler: h.baseHandler} }},
+		{"zookeeper", zookeeperport.DetectZK, func() TrafficHandler { return &zookeeperHandler{baseHandler: h.baseHandler} }},
+		{"websocket", websocketport.DetectWebSocket, func() TrafficHandler { return &websocketHandler{baseHandler: h.baseHandler} }},
+		{"nacos", nacosport.DetectNacos, func() TrafficHandler { return &nacosHandler{baseHandler: h.baseHandler} }},
 		{"http", httpport.DetectHTTP, func() TrafficHandler { return &httpHandler{baseHandler: h.baseHandler} }},
 	}
 
@@ -713,6 +846,41 @@ var subcommands = []subcommand{
 			"  tcpshow http -C 500+",
 		},
 	},
+	{
+		Name: "websocket", Description: "Capture WebSocket traffic",
+		Aliases: []string{"ws"},
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow websocket",
+			"  tcpshow ws -C 100+",
+		},
+	},
+	{
+		Name: "zookeeper", Description: "Capture ZooKeeper traffic",
+		Aliases: []string{"zk"},
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow zookeeper",
+			"  tcpshow zk -C 50+",
+		},
+	},
+	{
+		Name: "nacos", Description: "Capture Nacos HTTP API traffic",
+		Setup: func(fs *flag.FlagSet, p *ProtoConfig) {
+			fs.StringVar(&p.Cost, "C", "", "Cost filter: 100+, 50-200, -50")
+			fs.StringVar(&p.Cost, "cost", "", "Cost filter: 100+, 50-200, -50")
+		},
+		Examples: []string{
+			"  tcpshow nacos",
+			"  tcpshow nacos -C 200+",
+		},
+	},
 }
 
 // ---- CLI Framework ----
@@ -744,7 +912,7 @@ func subcommandByName(name string) *subcommand {
 }
 
 func printGlobalHelp() {
-	fmt.Printf(`tcpshow - TCP traffic sniffer for Dubbo, Redis, MySQL, MongoDB, RocketMQ, HTTP
+	fmt.Printf(`tcpshow - TCP traffic sniffer for Dubbo, Redis, MySQL, MongoDB, RocketMQ, HTTP, WebSocket, ZooKeeper, Nacos
 
 USAGE:
   tcpshow [global-flags] [protocol] [protocol-flags]
@@ -962,6 +1130,18 @@ func main() {
 			makeHandler = func(ck ConnectionKey) TrafficHandler {
 				return &httpHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
 			}
+		case "websocket":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &websocketHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
+			}
+		case "zookeeper":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &zookeeperHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
+			}
+		case "nacos":
+			makeHandler = func(ck ConnectionKey) TrafficHandler {
+				return &nacosHandler{baseHandler: baseHandler{Key: ck, Global: global, Proto: proto, Printer: printer}}
+			}
 		}
 	}
 
@@ -972,7 +1152,8 @@ func main() {
 			dubboport.DetectDubbo, dubboport.DetectTriple,
 			rocketmqport.DetectRocketMQ, mongoport.DetectMongo,
 			mysqlport.DetectMySQL, redisport.DetectRESP,
-			httpport.DetectHTTP,
+			zookeeperport.DetectZK, websocketport.DetectWebSocket,
+			nacosport.DetectNacos, httpport.DetectHTTP,
 		}
 		detector = func(data []byte) bool {
 			for _, d := range detectOrder {
