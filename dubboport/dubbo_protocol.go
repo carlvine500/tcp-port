@@ -127,9 +127,19 @@ type DubboMessage struct {
 	ResponseStatus string // human-readable status
 	HasException   bool
 
+	// Parsed request parameters (from compactedjava body)
+	Params      []KVPair // request parameter names (best-effort)
+	Attachments []KVPair // attachment key-value pairs from body
+
 	// Metadata
-	IsRealHeartbeat bool   // true only if body is very small (< 50 bytes)
-	ShowBody        bool   // if true, display raw body bytes
+	IsRealHeartbeat bool // true only if body is very small (< 50 bytes)
+	ShowBody        bool // if true, display parsed body fields
+}
+
+// KVPair is a key-value pair from the body.
+type KVPair struct {
+	Key   string
+	Value string
 }
 
 // ParseDubboBody performs best-effort parsing of Dubbo body.
@@ -177,6 +187,11 @@ func (m *DubboMessage) ParseDubboBody() {
 	}
 	if m.MethodName != "" {
 		m.MethodName = cleanMethodName(m.MethodName)
+	}
+
+	// Extract parameter names and attachments from body
+	if m.Header.IsRequest && len(m.Body) > 4 {
+		m.parseBodyParams()
 	}
 
 	// Label events that we couldn't identify.
@@ -407,6 +422,81 @@ func cleanMethodName(s string) string {
 	return s
 }
 
+// parseBodyParams extracts parameter names and attachment keys from
+// a compactedjava Dubbo body using string scanning heuristics.
+// Parameters appear as readable field names in the body after the
+// initial header fields (version, service, method, param types).
+// Attachments appear near the end as key-value pairs.
+func (m *DubboMessage) parseBodyParams() {
+	if len(m.Body) < 4 {
+		return
+	}
+
+	// Extract all readable strings from the body
+	allStrings := extractReadableStrings(m.Body, 2)
+
+	// Find the "attachment boundary" — where field names switch from
+	// parameter names to attachment keys. Common attachment prefixes
+	// start with underscore or are kebab-case / camelCase keywords.
+	attachStart := len(allStrings)
+	for i, s := range allStrings {
+		if len(s) >= 3 && (strings.HasPrefix(s, "_") ||
+			s == "interface" || s == "path" || s == "timeout" ||
+			s == "version" || s == "sw8" || strings.HasPrefix(s, "sw8-") ||
+			s == "accesslog" || s == "custom-request-response-id") {
+			attachStart = i
+			break
+		}
+	}
+
+	// Extract parameter names (camelCase, no underscores, not version/service/method)
+	seen := map[string]bool{m.ServiceName: true, m.MethodName: true, m.ServiceVersion: true}
+	for i := 0; i < attachStart && i < len(allStrings); i++ {
+		s := allStrings[i]
+		if seen[s] || len(s) < 2 || len(s) > 50 {
+			continue
+		}
+		if isJavaFieldName(s) {
+			m.Params = append(m.Params, KVPair{Key: s})
+			seen[s] = true
+		}
+	}
+
+	// Extract attachment key-value pairs (pairs of strings)
+	for i := attachStart; i+1 < len(allStrings); i += 2 {
+		key := allStrings[i]
+		val := allStrings[i+1]
+		// Skip obvious non-attachment keys
+		if strings.Contains(key, ".") && len(key) > 30 {
+			continue
+		}
+		if len(key) < 2 || len(key) > 50 {
+			continue
+		}
+		// Skip if value looks like another key (too long)
+		if len(val) > 60 {
+			val = val[:60] + "..."
+		}
+		m.Attachments = append(m.Attachments, KVPair{Key: key, Value: val})
+	}
+}
+
+// isJavaFieldName returns true if s looks like a Java field name (camelCase).
+func isJavaFieldName(s string) bool {
+	if len(s) < 2 || strings.Contains(s, ".") {
+		return false
+	}
+	first := rune(s[0])
+	if !unicode.IsLower(first) {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
 // extractReadableStrings scans a byte slice and extracts all sequences
 // of printable ASCII characters (letters, digits, dots, underscores, slashes)
 // that are at least minLen characters long. Sorted by position.

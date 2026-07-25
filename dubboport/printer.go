@@ -34,9 +34,24 @@ func FormatDubbo(msg *DubboMessage) string {
 	}
 	sb.WriteString(fmt.Sprintf("  Data Length: %d bytes\n", msg.Header.DataLength))
 
-	// Show raw body if requested
-	if msg.ShowBody && len(msg.Body) > 0 {
-		sb.WriteString(fmt.Sprintf("  Body:\n%s\n", hex.Dump(msg.Body)))
+	// Show parsed body fields if requested
+	if msg.ShowBody {
+		if len(msg.Params) > 0 {
+			sb.WriteString("  Params:\n")
+			for _, p := range msg.Params {
+				sb.WriteString(fmt.Sprintf("    %-22s %s\n", p.Key+":", p.Value))
+			}
+		}
+		if len(msg.Attachments) > 0 {
+			sb.WriteString("  Attachments:\n")
+			for _, a := range msg.Attachments {
+				sb.WriteString(fmt.Sprintf("    %-22s %s\n", a.Key+":", a.Value))
+			}
+		}
+		// Fall back to hex dump if no parsed fields
+		if len(msg.Params) == 0 && len(msg.Attachments) == 0 && len(msg.Body) > 0 {
+			sb.WriteString(fmt.Sprintf("  Body:\n%s\n", hex.Dump(msg.Body)))
+		}
 	}
 
 	return sb.String()
@@ -70,7 +85,6 @@ func FormatDubboURL(msg *DubboMessage) string {
 		return fmt.Sprintf("[heartbeat] id=%d\n", msg.Header.RequestID)
 	}
 	if msg.Header.IsEvent {
-		// IsEvent set but body too large for real heartbeat — show with flag
 		return fmt.Sprintf("%s/%s [event] id=%d\n", msg.ServiceName, msg.MethodName, msg.Header.RequestID)
 	}
 	if msg.Header.IsRequest {
