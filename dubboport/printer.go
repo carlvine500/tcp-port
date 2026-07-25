@@ -2,6 +2,7 @@ package dubboport
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -36,21 +37,30 @@ func FormatDubbo(msg *DubboMessage) string {
 
 	// Show parsed body fields if requested
 	if msg.ShowBody {
-		if len(msg.Params) > 0 {
-			sb.WriteString("  Params:\n")
-			for _, p := range msg.Params {
-				sb.WriteString(fmt.Sprintf("    %-22s %s\n", p.Key+":", p.Value))
+		if msg.ParsedArgs != nil {
+			jsonBytes, err := json.MarshalIndent(msg.ParsedArgs, "    ", "  ")
+			if err == nil {
+				sb.WriteString("  Args: ")
+				sb.Write(jsonBytes)
+				sb.WriteString("\n")
 			}
-		}
-		if len(msg.Attachments) > 0 {
-			sb.WriteString("  Attachments:\n")
-			for _, a := range msg.Attachments {
-				sb.WriteString(fmt.Sprintf("    %-22s %s\n", a.Key+":", a.Value))
+		} else {
+			if len(msg.Params) > 0 {
+				sb.WriteString("  Params:\n")
+				for _, p := range msg.Params {
+					sb.WriteString(fmt.Sprintf("    %-22s %s\n", p.Key+":", p.Value))
+				}
 			}
-		}
-		// Fall back to hex dump if no parsed fields
-		if len(msg.Params) == 0 && len(msg.Attachments) == 0 && len(msg.Body) > 0 {
-			sb.WriteString(fmt.Sprintf("  Body:\n%s\n", hex.Dump(msg.Body)))
+			if len(msg.Attachments) > 0 {
+				sb.WriteString("  Attachments:\n")
+				for _, a := range msg.Attachments {
+					sb.WriteString(fmt.Sprintf("    %-22s %s\n", a.Key+":", a.Value))
+				}
+			}
+			// Fall back to hex dump if no parsed fields
+			if len(msg.Params) == 0 && len(msg.Attachments) == 0 && len(msg.Body) > 0 {
+				sb.WriteString(fmt.Sprintf("  Body:\n%s\n", hex.Dump(msg.Body)))
+			}
 		}
 	}
 

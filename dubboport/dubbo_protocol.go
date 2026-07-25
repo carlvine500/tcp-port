@@ -131,6 +131,10 @@ type DubboMessage struct {
 	Params      []KVPair // request parameter names (best-effort)
 	Attachments []KVPair // attachment key-value pairs from body
 
+	// Parsed argument values from Java deserializer (compactedjava only)
+	ParsedArgs  map[string]interface{} // field-name → value map
+	ArgStartPos int                    // byte offset where Java serialization args begin
+
 	// Metadata
 	IsRealHeartbeat bool // true only if body is very small (< 50 bytes)
 	ShowBody        bool // if true, display parsed body fields
@@ -189,6 +193,16 @@ func (m *DubboMessage) ParseDubboBody() {
 		m.MethodName = cleanMethodName(m.MethodName)
 	}
 
+	// For compactedjava: try to deserialize Java args from the body
+	// after the compactedjava header strings.
+	if m.Header.SerializationID == SerializationCompactedJava &&
+		m.ArgStartPos > 0 && m.ArgStartPos < len(m.Body) {
+		parsed, err := ParseJavaSerializedArgs(m.Body, m.ArgStartPos)
+		if err == nil && len(parsed) > 0 {
+			m.ParsedArgs = parsed
+		}
+	}
+
 	// Extract parameter names and attachments from body
 	if m.Header.IsRequest && len(m.Body) > 4 {
 		m.parseBodyParams()
@@ -235,6 +249,9 @@ func (m *DubboMessage) parseCompactedJavaDirect() {
 			strings = append(strings, s)
 		}
 	}
+
+	// Record where the Java serialization stream starts (after header strings).
+	m.ArgStartPos = pos
 
 	if len(strings) >= 4 {
 		// strings[0] = dubbo version (e.g. "2.0.2")
