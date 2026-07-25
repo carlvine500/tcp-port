@@ -61,8 +61,12 @@ func FormatTriple(msg *TripleMessage) string {
 
 // FormatDubboURL formats a minimal URL-level dubbo message.
 func FormatDubboURL(msg *DubboMessage) string {
-	if msg.Header.IsEvent {
+	if msg.IsRealHeartbeat {
 		return fmt.Sprintf("[heartbeat] id=%d\n", msg.Header.RequestID)
+	}
+	if msg.Header.IsEvent {
+		// IsEvent set but body too large for real heartbeat — show with flag
+		return fmt.Sprintf("%s/%s [event] id=%d\n", msg.ServiceName, msg.MethodName, msg.Header.RequestID)
 	}
 	if msg.Header.IsRequest {
 		return fmt.Sprintf("%s/%s\n", msg.ServiceName, msg.MethodName)

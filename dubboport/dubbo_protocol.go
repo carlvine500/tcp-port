@@ -12,10 +12,17 @@ const (
 	DubboMagicNumber   uint16 = 0xdabb
 	DubboHeaderSize           = 16
 
-	// Flag bits
+	// Flag bits — Alibaba Dubbo layout (legacy 2.5.x)
 	FlagSerializationMask byte = 0x1f // bits 0-4
 	FlagTwoway           byte = 0x20 // bit 5: request is twoway (expects response)
 	FlagEvent            byte = 0x40 // bit 6: is heartbeat event
+
+	// Flag bits — Apache Dubbo layout (2.7.x / 3.x)
+	// In Apache Dubbo, Twoway and Event bits are SWAPPED:
+	//   FLAG_TWOWAY = 0x40 (bit 6)
+	//   FLAG_EVENT  = 0x20 (bit 5)
+	FlagApacheTwoway byte = 0x40
+	FlagApacheEvent  byte = 0x20
 )
 
 // DubboHeader represents the 16-byte Dubbo protocol header.
@@ -50,13 +57,58 @@ func ParseDubboHeader(data []byte) (*DubboHeader, error) {
 	h.RequestID = binary.BigEndian.Uint64(data[4:12])
 	h.DataLength = binary.BigEndian.Uint32(data[12:16])
 
-	// Parse flag
+	// Parse flag (Alibaba Dubbo layout by default)
 	h.SerializationID = SerializationType(h.Flag & FlagSerializationMask)
 	h.IsTwoway = (h.Flag & FlagTwoway) != 0
 	h.IsEvent = (h.Flag & FlagEvent) != 0
 	h.IsRequest = h.Status == 0 // status=0 means request
 
 	return h, nil
+}
+
+// fixupFlags detects and corrects the flag-bit layout when it appears
+// to be Apache Dubbo (where Twoway=0x40, Event=0x20) rather than
+// Alibaba Dubbo (where Twoway=0x20, Event=0x40).
+//
+// Heuristic: a request with IsEvent=true AND a large body (>50 bytes)
+// is almost certainly NOT a real heartbeat. In that case the bits are
+// likely swapped (Apache layout). We re-interpret the flag byte and
+// swap back if the alternative reading gives Twoway=true + Event=false.
+func (h *DubboHeader) fixupFlags() {
+	if !h.IsRequest || h.DataLength <= 50 {
+		return
+	}
+
+	// Already looks reasonable — twoway RPC, no event bit
+	if h.IsTwoway && !h.IsEvent {
+		return
+	}
+
+	// IsEvent=true with a large body is suspicious.
+	// Try Apache Dubbo layout: Twoway at 0x40, Event at 0x20.
+	apacheTwoway := (h.Flag & FlagApacheTwoway) != 0
+	apacheEvent := (h.Flag & FlagApacheEvent) != 0
+
+	// If Apache layout gives Twoway=true and Event=false,
+	// and the body is large enough to be a real RPC, adopt it.
+	if apacheTwoway && !apacheEvent && h.DataLength > 50 {
+		h.IsTwoway = apacheTwoway
+		h.IsEvent = apacheEvent
+		return
+	}
+
+	// If the current layout already has Twoway=false + Event=true
+	// and Apache layout doesn't improve it, try a third heuristic:
+	// if body > 200 bytes and both layouts disagree, prefer Apache.
+	if h.DataLength > 200 {
+		if apacheTwoway != h.IsTwoway || apacheEvent != h.IsEvent {
+			// Large body — prefer the layout that says twoway=true
+			if apacheTwoway && !h.IsTwoway {
+				h.IsTwoway = apacheTwoway
+				h.IsEvent = apacheEvent
+			}
+		}
+	}
 }
 
 // DubboMessage represents a complete Dubbo protocol message.
@@ -80,28 +132,44 @@ type DubboMessage struct {
 
 // ParseDubboBody performs best-effort parsing of Dubbo body.
 func (m *DubboMessage) ParseDubboBody() {
+	// Auto-detect and fix flag-bit layout (Alibaba vs Apache Dubbo).
+	// Apache Dubbo swaps the Twoway (0x40) and Event (0x20) bits,
+	// which would otherwise cause all RPCs to be mis-read as one-way events.
+	m.Header.fixupFlags()
+
 	if !m.Header.IsRequest {
 		m.ResponseStatus = StatusString(m.Header.Status)
 		m.HasException = m.Header.Status != StatusOK
 		return
 	}
 
-	// Detect real heartbeat: IsEvent + tiny body
+	// Detect real heartbeat: IsEvent + tiny body (≤50 bytes).
+	// A genuine Dubbo heartbeat has a 1-byte body (single null).
 	m.IsRealHeartbeat = m.Header.IsEvent && len(m.Body) <= 50
 
-	// For compactedjava serialization (Dubbo 2.5.x), use string scanning
-	if m.Header.SerializationID == SerializationCompactedJava {
-		m.parseCompactedJavaBody()
-	} else {
+	// Parse body based on serialization type.
+	switch m.Header.SerializationID {
+	case SerializationCompactedJava:
+		// CompactedJava uses its own string encoding (2-byte len prefix).
+		// Try the structured parser first, then fall back to heuristic.
+		m.parseCompactedJavaDirect()
+		if m.ServiceName == "" && m.MethodName == "" {
+			m.parseCompactedJavaBody()
+		}
+	case SerializationHessian2, SerializationHessian1:
 		m.parseRequestMetadata()
+	default:
+		// For kryo, protobuf, fastjson, etc. we can't parse the body
+		// without full deserialization. Fall back to generic string scan.
+		m.parseGenericBody()
 	}
 
-	// Still empty? Try generic string scan as fallback
+	// Still empty after type-specific parsing? Try generic fallback.
 	if m.ServiceName == "" && m.MethodName == "" && len(m.Body) > 2 {
 		m.parseGenericBody()
 	}
 
-	// Label unknown events
+	// Label events that we couldn't identify.
 	if m.Header.IsEvent && m.MethodName == "" {
 		if m.IsRealHeartbeat {
 			m.MethodName = "heartbeat"
@@ -109,6 +177,96 @@ func (m *DubboMessage) ParseDubboBody() {
 			m.MethodName = "(event)"
 		}
 	}
+}
+
+// parseCompactedJavaDirect reads strings using the compactedjava format:
+// 2-byte big-endian unsigned short length + UTF-8 bytes.
+// In Dubbo 2.5.x compactedjava, the body typically starts with:
+//
+//	dubbo_version  (UTF string)
+//	service_name   (UTF string)
+//	service_version (UTF string)
+//	method_name    (UTF string)
+//	param_types    (UTF string)
+//	arguments...   (Java serialization)
+//	attachments... (Java serialization)
+func (m *DubboMessage) parseCompactedJavaDirect() {
+	if len(m.Body) < 2 {
+		return
+	}
+
+	pos := 0
+	strings := make([]string, 0, 6)
+	for i := 0; i < 8 && pos+2 <= len(m.Body); i++ {
+		length := int(binary.BigEndian.Uint16(m.Body[pos : pos+2]))
+		pos += 2
+		if length <= 0 || length > 10000 || pos+length > len(m.Body) {
+			break
+		}
+		s := string(m.Body[pos : pos+length])
+		pos += length
+		// Only accept printable ASCII strings (likely real field names)
+		if isReadableString(s) {
+			strings = append(strings, s)
+		}
+	}
+
+	if len(strings) >= 4 {
+		// strings[0] = dubbo version (e.g. "2.0.2")
+		// strings[1] = service name (e.g. "com.example.DemoService")
+		// strings[2] = service version (e.g. "1.0.0")
+		// strings[3] = method name (e.g. "sayHello")
+		// strings[4] = param types (e.g. "Ljava/lang/String;")
+		if containsDot(strings[1]) || strings[1] == strings[0] {
+			// strings[1] looks like a service name OR same as dubbo version
+			// (in some Dubbo versions the fields might be shifted)
+			if containsDot(strings[1]) {
+				m.ServiceName = strings[1]
+				m.ServiceVersion = strings[2]
+				m.MethodName = strings[3]
+			} else if len(strings) >= 5 && containsDot(strings[2]) {
+				// Shifted: dubbo_ver at [0], service at [2], method at [4]
+				m.ServiceName = strings[2]
+				m.ServiceVersion = strings[3]
+				m.MethodName = strings[4]
+			}
+		} else if containsDot(strings[2]) {
+			m.ServiceName = strings[2]
+			m.ServiceVersion = strings[3]
+			m.MethodName = strings[4] // or maybe strings[1]?
+		} else {
+			// Try alternate: find the first dotted string as service
+			for i, s := range strings {
+				if containsDot(s) && m.ServiceName == "" {
+					m.ServiceName = s
+					if i+1 < len(strings) && !containsDot(strings[i+1]) {
+						m.ServiceVersion = strings[i+1]
+					}
+					if i+2 < len(strings) {
+						m.MethodName = strings[i+2]
+					}
+				}
+			}
+		}
+		if len(strings) >= 5 {
+			m.ParamTypes = strings[len(strings)-1] // last string is often param types
+		}
+	}
+}
+
+// isReadableString returns true if s consists only of printable ASCII
+// characters commonly found in class/method/version names.
+func isReadableString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < 0x20 || b > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // parseCompactedJavaBody extracts service/method from compactedjava serialized body.

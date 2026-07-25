@@ -237,7 +237,11 @@ func (h *dubboHandler) handleDubbo(reqR, respR *bufio.Reader) {
 		}
 		resp, err := dubboport.ReadDubboMessage(respR)
 		if err != nil {
-			break
+			// Response not (yet) available — send the request alone
+			// and continue. Don't break the loop on read failure.
+			logger.Debug("dubbo response read error:", err)
+			h.send()
+			continue
 		}
 		if !h.checkCost() {
 			h.send() // flush empty to reset buf

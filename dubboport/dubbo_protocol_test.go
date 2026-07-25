@@ -303,3 +303,207 @@ func TestReadHessian2String(t *testing.T) {
 		})
 	}
 }
+
+// TestFixupFlagsApacheDubbo tests that Apache Dubbo flag layout
+// (Twoway=0x40, Event=0x20) is auto-detected and corrected.
+func TestFixupFlagsApacheDubbo(t *testing.T) {
+	// Simulate Apache Dubbo layout:
+	// Flag = serialization(hessian2=0) | Twoway(0x40) | Event(0x00) = 0x40
+	// Current code initially parses: IsTwoway=false(0x20), IsEvent=true(0x40)
+	// After fixup: IsTwoway=true, IsEvent=false
+	h := &DubboHeader{
+		Flag:       0x40, // Apache: twoway=true, event=false, serialization=0
+		Status:     0x00, // request
+		DataLength: 200,  // large body — not a heartbeat
+		IsRequest:  true,
+	}
+	// Simulate initial (Alibaba) parsing
+	h.IsTwoway = (h.Flag & FlagTwoway) != 0 // 0x40 & 0x20 = 0 → false
+	h.IsEvent = (h.Flag & FlagEvent) != 0   // 0x40 & 0x40 = 1 → true
+
+	h.fixupFlags()
+
+	if !h.IsTwoway {
+		t.Error("IsTwoway should be true after fixup (Apache layout)")
+	}
+	if h.IsEvent {
+		t.Error("IsEvent should be false after fixup (Apache layout)")
+	}
+}
+
+// TestFixupFlagsApacheDubboCompactedJava tests Apache layout with
+// compactedjava serialization (mimics the user's reported scenario).
+func TestFixupFlagsApacheDubboCompactedJava(t *testing.T) {
+	h := &DubboHeader{
+		Flag:       0x42, // serialization=2(compactedjava) | Twoway=0x40(Apache)
+		Status:     0x00,
+		DataLength: 1382, // user's reported body size
+		IsRequest:  true,
+	}
+	h.IsTwoway = (h.Flag & FlagTwoway) != 0 // 0x42 & 0x20 = 0 → false (WRONG)
+	h.IsEvent = (h.Flag & FlagEvent) != 0   // 0x42 & 0x40 = 1 → true (WRONG)
+
+	h.fixupFlags()
+
+	if !h.IsTwoway {
+		t.Error("IsTwoway should be true after fixup (Apache layout with compactedjava)")
+	}
+	if h.IsEvent {
+		t.Error("IsEvent should be false after fixup (Apache layout with compactedjava)")
+	}
+}
+
+// TestFixupFlagsAlibabaDubbo tests that valid Alibaba Dubbo layout is NOT changed.
+func TestFixupFlagsAlibabaDubbo(t *testing.T) {
+	h := &DubboHeader{
+		Flag:       0x22, // serialization=2 | Alibaba:Twoway=0x20, event=false
+		Status:     0x00,
+		DataLength: 300,
+		IsRequest:  true,
+	}
+	h.IsTwoway = (h.Flag & FlagTwoway) != 0 // true
+	h.IsEvent = (h.Flag & FlagEvent) != 0   // false
+
+	h.fixupFlags()
+
+	if !h.IsTwoway {
+		t.Error("IsTwoway should remain true (Alibaba layout)")
+	}
+	if h.IsEvent {
+		t.Error("IsEvent should remain false (Alibaba layout)")
+	}
+}
+
+// TestFixupFlagsRealHeartbeat tests that real heartbeats are NOT fixed up.
+func TestFixupFlagsRealHeartbeat(t *testing.T) {
+	h := &DubboHeader{
+		Flag:       0x62, // serialization=2 | Event=0x40, twoway=false
+		Status:     0x00,
+		DataLength: 1, // real heartbeat: 1-byte body
+		IsRequest:  true,
+	}
+	h.IsTwoway = (h.Flag & FlagTwoway) != 0
+	h.IsEvent = (h.Flag & FlagEvent) != 0
+
+	origTwoway := h.IsTwoway
+	origEvent := h.IsEvent
+
+	h.fixupFlags()
+
+	if h.IsTwoway != origTwoway {
+		t.Error("Real heartbeat: IsTwoway should not change")
+	}
+	if h.IsEvent != origEvent {
+		t.Error("Real heartbeat: IsEvent should not change")
+	}
+}
+
+// TestParseCompactedJavaDirect tests direct parsing of compactedjava body.
+func TestParseCompactedJavaDirect(t *testing.T) {
+	var body []byte
+	writeCJString := func(s string) {
+		length := len(s)
+		body = append(body, byte(length>>8), byte(length))
+		body = append(body, []byte(s)...)
+	}
+
+	writeCJString("2.0.2")                    // dubbo version
+	writeCJString("com.example.DemoService")   // service name
+	writeCJString("1.0.0")                     // service version
+	writeCJString("sayHello")                   // method name
+	writeCJString("Ljava/lang/String;")         // param types
+
+	header := &DubboHeader{
+		SerializationID: SerializationCompactedJava,
+		IsRequest:       true,
+	}
+	msg := &DubboMessage{
+		Header: header,
+		Body:   body,
+	}
+	msg.parseCompactedJavaDirect()
+
+	if msg.ServiceName != "com.example.DemoService" {
+		t.Errorf("ServiceName = %q, want %q", msg.ServiceName, "com.example.DemoService")
+	}
+	if msg.ServiceVersion != "1.0.0" {
+		t.Errorf("ServiceVersion = %q, want %q", msg.ServiceVersion, "1.0.0")
+	}
+	if msg.MethodName != "sayHello" {
+		t.Errorf("MethodName = %q, want %q", msg.MethodName, "sayHello")
+	}
+}
+
+// TestIsReadableString tests the printable ASCII helper.
+func TestIsReadableString(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"hello", true},
+		{"com.example.DemoService", true},
+		{"sayHello", true},
+		{"2.0.2", true},
+		{"Ljava/lang/String;", true},
+		{"", false},
+		{"hello\x00world", false},
+		{"hello\xffworld", false},
+	}
+	for _, tt := range tests {
+		got := isReadableString(tt.input)
+		if got != tt.want {
+			t.Errorf("isReadableString(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestParseDubboBodyApacheCompactJava tests end-to-end:
+// Apache Dubbo layout + compactedjava + large body → correct parsing.
+func TestParseDubboBodyApacheCompactJava(t *testing.T) {
+	var body []byte
+	writeCJString := func(s string) {
+		length := len(s)
+		body = append(body, byte(length>>8), byte(length))
+		body = append(body, []byte(s)...)
+	}
+	writeCJString("2.0.2")
+	writeCJString("com.example.OrderService")
+	writeCJString("1.0.0")
+	writeCJString("createOrder")
+	writeCJString("Lcom/example/Order;")
+
+	header := &DubboHeader{
+		Flag:             0x42, // Apache: twoway=0x40, event=false, serialization=2
+		Status:           0x00,
+		DataLength:       uint32(len(body)),
+		SerializationID: SerializationCompactedJava,
+		IsTwoway:        false, // initially mis-parsed
+		IsEvent:         true,  // initially mis-parsed
+		IsRequest:       true,
+	}
+
+	msg := &DubboMessage{
+		Header: header,
+		Body:   body,
+	}
+	msg.ParseDubboBody()
+
+	// After fixup: IsTwoway should be true, IsEvent false
+	if !msg.Header.IsTwoway {
+		t.Error("IsTwoway should be corrected to true")
+	}
+	if msg.Header.IsEvent {
+		t.Error("IsEvent should be corrected to false")
+	}
+
+	// Service/method should be parsed
+	if msg.ServiceName != "com.example.OrderService" {
+		t.Errorf("ServiceName = %q, want %q", msg.ServiceName, "com.example.OrderService")
+	}
+	if msg.MethodName != "createOrder" {
+		t.Errorf("MethodName = %q, want %q", msg.MethodName, "createOrder")
+	}
+	if msg.ServiceVersion != "1.0.0" {
+		t.Errorf("ServiceVersion = %q, want %q", msg.ServiceVersion, "1.0.0")
+	}
+}
