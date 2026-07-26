@@ -779,11 +779,45 @@ func (d *javaDeserializer) skipBlockData() (interface{}, error) {
 // body is the full Dubbo body; startPos marks where the Java serialization
 // stream begins (after the compactedjava header strings). Returns a map of
 // field-name to value, or nil with error if nothing could be parsed.
+//
+// If startPos does not point to the beginning of a valid Java stream
+// (STREAM_MAGIC or TC_OBJECT), the function scans forward from startPos
+// to find the start of the stream, providing defense-in-depth against
+// off-by errors in the caller's position calculation.
 func ParseJavaSerializedArgs(body []byte, startPos int) (map[string]interface{}, error) {
 	if startPos < 0 || startPos >= len(body) {
 		return nil, fmt.Errorf("invalid start position %d for body of length %d", startPos, len(body))
 	}
-	return deserializeJavaArgs(body[startPos:])
+
+	pos := startPos
+	dataLen := len(body)
+
+	// If we're already at a valid Java stream header, use it directly
+	if pos+4 <= dataLen &&
+		binary.BigEndian.Uint16(body[pos:pos+2]) == _streamMagic &&
+		binary.BigEndian.Uint16(body[pos+2:pos+4]) == _streamVersion {
+		return deserializeJavaArgs(body[pos:])
+	}
+	if pos < dataLen && body[pos] == _tcObject {
+		return deserializeJavaArgs(body[pos:])
+	}
+
+	// Scan forward for STREAM_MAGIC + VERSION from startPos
+	for scan := pos; scan+4 <= dataLen; scan++ {
+		if binary.BigEndian.Uint16(body[scan:scan+2]) == _streamMagic &&
+			binary.BigEndian.Uint16(body[scan+2:scan+4]) == _streamVersion {
+			return deserializeJavaArgs(body[scan:])
+		}
+	}
+
+	// Fallback: try to find TC_OBJECT as stream start
+	for scan := pos; scan < dataLen; scan++ {
+		if body[scan] == _tcObject {
+			return deserializeJavaArgs(body[scan:])
+		}
+	}
+
+	return nil, fmt.Errorf("no Java stream found at or after position %d", startPos)
 }
 
 // skipClassDescWithData reads and skips a TC_OBJECT's class descriptor

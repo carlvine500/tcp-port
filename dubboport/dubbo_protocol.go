@@ -248,7 +248,8 @@ func (m *DubboMessage) parseCompactedJavaDirect() {
 	}
 
 	pos := 0
-	strings := make([]string, 0, 6)
+	hdrStrs := make([]string, 0, 8)
+	lastReadableEnd := 0 // track end of last readable string for ArgStartPos
 	for i := 0; i < 8 && pos+2 <= len(m.Body); i++ {
 		length := int(binary.BigEndian.Uint16(m.Body[pos : pos+2]))
 		pos += 2
@@ -259,59 +260,111 @@ func (m *DubboMessage) parseCompactedJavaDirect() {
 		pos += length
 		// Only accept printable ASCII strings (likely real field names)
 		if isReadableString(s) {
-			strings = append(strings, s)
+			hdrStrs = append(hdrStrs, s)
+			lastReadableEnd = pos // record end of this readable string
 		}
 	}
 
-	// Record where the Java serialization stream starts (after header strings).
-	m.ArgStartPos = pos
+	// ArgStartPos must point to the beginning of the Java serialization
+	// stream, NOT past STREAM_MAGIC. The loop above breaks when it reads
+	// a 2-byte "length" that exceeds 10000 — almost certainly STREAM_MAGIC
+	// (0xACED = 44269). Since the loop does pos += 2 before checking the
+	// length, pos is now 2 bytes PAST STREAM_MAGIC.
+	//
+	// We start from lastReadableEnd (end of last header string) and scan
+	// forward for the actual STREAM_MAGIC + STREAM_VERSION marker, or
+	// fall back to pos-2 (back up over the "length" that broke the loop).
+	m.ArgStartPos = lastReadableEnd
+	if m.ArgStartPos == 0 && pos >= 2 {
+		m.ArgStartPos = pos - 2
+	}
+	// Refine: scan forward for the Java stream start marker.
+	// Priority: 0xACED0005 (STREAM_MAGIC) > 0x73 (TC_OBJECT).
+	foundStream := false
+	for scan := m.ArgStartPos; scan+2 <= len(m.Body); scan++ {
+		if scan+4 <= len(m.Body) &&
+			binary.BigEndian.Uint16(m.Body[scan:scan+2]) == 0xACED &&
+			binary.BigEndian.Uint16(m.Body[scan+2:scan+4]) == 0x0005 {
+			m.ArgStartPos = scan
+			foundStream = true
+			break
+		}
+		if m.Body[scan] == 0x73 { // TC_OBJECT — stream without STREAM_MAGIC
+			m.ArgStartPos = scan
+			foundStream = true
+			break
+		}
+	}
+	if !foundStream {
+		m.ArgStartPos = 0 // signal that we couldn't find the stream
+	}
 
-	if len(strings) >= 4 {
-		// strings[0] = dubbo version (e.g. "2.0.2")
-		// strings[1] = service name (e.g. "com.example.DemoService")
-		// strings[2] = service version (e.g. "1.0.0")
-		// strings[3] = method name (e.g. "sayHello")
-		// strings[4] = param types (e.g. "Ljava/lang/String;")
-		if isNumericDotOnly(strings[1]) {
-			// strings[1] is garbage; try shifted layout
-			if len(strings) >= 5 && containsDot(strings[2]) {
-				m.ServiceName = strings[2]
-				m.ServiceVersion = strings[3]
-				m.MethodName = strings[4]
+	if len(hdrStrs) >= 4 {
+		// Typical compactedjava layout (Alibaba Dubbo 2.5.x):
+		//   hdrStrs[0] = dubbo version (e.g. "2.0.2")
+		//   hdrStrs[1] = service name (e.g. "com.example.DemoService")
+		//   hdrStrs[2] = service version (e.g. "1.0.0")
+		//   hdrStrs[3] = method name (e.g. "sayHello")
+		//   hdrStrs[4] = param types (e.g. "Ljava/lang/String;")
+		if isNumericDotOnly(hdrStrs[1]) {
+			// hdrStrs[1] is garbage; try shifted layout: service at [2], method at [4]
+			if len(hdrStrs) >= 5 && containsDot(hdrStrs[2]) {
+				m.ServiceName = hdrStrs[2]
+				m.ServiceVersion = hdrStrs[3]
+				if isJavaMethodName(hdrStrs[4]) {
+					m.MethodName = hdrStrs[4]
+				}
 			}
-		} else if containsDot(strings[1]) || strings[1] == strings[0] {
-			// strings[1] looks like a service name OR same as dubbo version
-			// (in some Dubbo versions the fields might be shifted)
-			if containsDot(strings[1]) {
-				m.ServiceName = strings[1]
-				m.ServiceVersion = strings[2]
-				m.MethodName = strings[3]
-			} else if len(strings) >= 5 && containsDot(strings[2]) {
-				// Shifted: dubbo_ver at [0], service at [2], method at [4]
-				m.ServiceName = strings[2]
-				m.ServiceVersion = strings[3]
-				m.MethodName = strings[4]
+		} else if containsDot(hdrStrs[1]) {
+			// hdrStrs[1] looks like a service name
+			m.ServiceName = hdrStrs[1]
+			m.ServiceVersion = hdrStrs[2]
+			if isJavaMethodName(hdrStrs[3]) {
+				m.MethodName = hdrStrs[3]
 			}
-		} else if containsDot(strings[2]) {
-			m.ServiceName = strings[2]
-			m.ServiceVersion = strings[3]
-			m.MethodName = strings[4] // or maybe strings[1]?
-		} else {
-			// Try alternate: find the first dotted string as service
-			for i, s := range strings {
-				if containsDot(s) && m.ServiceName == "" && !isNumericDotOnly(s) {
-					m.ServiceName = s
-					if i+1 < len(strings) && !containsDot(strings[i+1]) {
-						m.ServiceVersion = strings[i+1]
-					}
-					if i+2 < len(strings) {
-						m.MethodName = strings[i+2]
+		} else if hdrStrs[1] == hdrStrs[0] && len(hdrStrs) >= 5 && containsDot(hdrStrs[2]) {
+			// Shifted: dubbo_ver at [0] and [1], service at [2], method at [4]
+			m.ServiceName = hdrStrs[2]
+			m.ServiceVersion = hdrStrs[3]
+			if isJavaMethodName(hdrStrs[4]) {
+				m.MethodName = hdrStrs[4]
+			}
+		} else if containsDot(hdrStrs[2]) {
+			// Service at [2], version at [3], method at [4] (or [1]?)
+			m.ServiceName = hdrStrs[2]
+			m.ServiceVersion = hdrStrs[3]
+			if len(hdrStrs) > 4 && isJavaMethodName(hdrStrs[4]) {
+				m.MethodName = hdrStrs[4]
+			}
+		}
+
+		// If method name still not found, scan for a camelCase candidate
+		// that looks like a Java method (not a field name appearing after params).
+		// Prefer strings before any param-type string (contains ';' or '('),
+		// because field names like "companyId" come after param types in the
+		// body and may be accidentally included in the hdrStrs list.
+		if m.MethodName == "" {
+			paramTypeIdx := -1
+			for i, s := range hdrStrs {
+				if strings.Contains(s, ";") || strings.Contains(s, "(") {
+					paramTypeIdx = i
+					break
+				}
+			}
+			for i, s := range hdrStrs {
+				if isJavaMethodName(s) && s != m.ServiceName && s != m.ServiceVersion {
+					// If we know where param types are, only accept method
+					// names that appear BEFORE the param types.
+					if paramTypeIdx < 0 || i < paramTypeIdx {
+						m.MethodName = s
+						break
 					}
 				}
 			}
 		}
-		if len(strings) >= 5 {
-			m.ParamTypes = strings[len(strings)-1] // last string is often param types
+
+		if len(hdrStrs) >= 5 {
+			m.ParamTypes = hdrStrs[len(hdrStrs)-1] // last string is often param types
 		}
 	}
 }
@@ -335,14 +388,14 @@ func isReadableString(s string) bool {
 // The body contains Java serialization data with class descriptors.
 // We scan for readable ASCII sequences that look like class names and method names.
 func (m *DubboMessage) parseCompactedJavaBody() {
-	strings := extractReadableStrings(m.Body, 5) // min length 5
-	if len(strings) == 0 {
+	foundStrs := extractReadableStrings(m.Body, 5) // min length 5
+	if len(foundStrs) == 0 {
 		return
 	}
 
 	// Find service name: longest string containing '.' (Java fully-qualified class name)
 	// In Dubbo 2.5.x compactedjava, the service interface appears as a class descriptor
-	for _, s := range strings {
+	for _, s := range foundStrs {
 		if containsDot(s) && len(s) > len(m.ServiceName) && !looksLikeMethodOrParam(s) {
 			m.ServiceName = s
 		}
@@ -350,7 +403,7 @@ func (m *DubboMessage) parseCompactedJavaBody() {
 
 	// If no dotted name found, take the first long alphanumeric string as service
 	if m.ServiceName == "" {
-		for _, s := range strings {
+		for _, s := range foundStrs {
 			if len(s) >= 8 && isAlphanumericDot(s) {
 				m.ServiceName = s
 				break
@@ -358,19 +411,41 @@ func (m *DubboMessage) parseCompactedJavaBody() {
 		}
 	}
 
-	// Find method name: short readable string that looks like a Java method
-	for _, s := range strings {
-		if m.MethodName == "" && isJavaMethodName(s) && s != m.ServiceName {
-			m.MethodName = s
+	// Find method name: prefer camelCase strings that appear BEFORE
+	// attachment keys (prefixed with '_', etc.) to avoid picking up
+	// field names like "companyId" that appear later in the body.
+	attachBoundary := len(foundStrs)
+	for i, s := range foundStrs {
+		if strings.HasPrefix(s, "_") || s == "interface" ||
+			s == "path" || s == "timeout" || s == "version" ||
+			strings.Contains(s, ";") || strings.Contains(s, "(") {
+			attachBoundary = i
 			break
+		}
+	}
+	for i, s := range foundStrs {
+		if m.MethodName == "" && isJavaMethodName(s) && s != m.ServiceName {
+			if i < attachBoundary {
+				m.MethodName = s
+				break
+			}
+		}
+	}
+	// Fallback: if no method found before the boundary, use first valid candidate
+	if m.MethodName == "" {
+		for _, s := range foundStrs {
+			if isJavaMethodName(s) && s != m.ServiceName {
+				m.MethodName = s
+				break
+			}
 		}
 	}
 }
 
 // parseGenericBody scans any body for readable strings as last-resort fallback.
 func (m *DubboMessage) parseGenericBody() {
-	strings := extractReadableStrings(m.Body, 4)
-	for _, s := range strings {
+	foundStrs := extractReadableStrings(m.Body, 4)
+	for _, s := range foundStrs {
 		if containsDot(s) && m.ServiceName == "" {
 			m.ServiceName = s
 		}
